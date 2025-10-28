@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parts Purchase Management (Standalone)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://kit.fontawesome.com/a5906d96e5.js" crossorigin="anonymous"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .modal-overlay { background-color: rgba(0, 0, 0, 0.6); }
+        .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <script type="module">
+
+        const firebaseConfigObj = {
+            apiKey: "AIzaSyDg2bYPWLDImo6VGMrfZREZJktOiC4nxgo",
+            authDomain: "mobile-repair-tracker.firebaseapp.com",
+            projectId: "mobile-repair-tracker",
+            storageBucket: "mobile-repair-tracker.firebasestorage.app",
+            messagingSenderId: "539581513263",
+            appId: "1:539581513263:web:0e4f16000d271ea79550da",
+            measurementId: "G-53ZS6LKB70"
+        };
+
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, updateDoc, doc, getDocs, where, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let appId = "1:539581513263:web:0e4f16000d271ea79550da";
+
+        // Initialize and Authenticate
+        window.initFirebase = async () => {
+            try {
+                setLogLevel('error');
+                const firebaseConfig = firebaseConfigObj;
+                const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (!firebaseConfig) {
+                    console.error("Firebase config is missing.");
+                    document.getElementById('loading-message').textContent = 'Error: Firebase configuration missing.';
+                    return;
+                }
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                await setPersistence(auth, browserLocalPersistence);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated:", userId);
+                        setupPurchaseListener(); // Start listening for purchases
+                    } else {
+                        try {
+                            if (authToken) {
+                                await signInWithCustomToken(auth, authToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                            document.getElementById('loading-message').textContent = `Authentication failed: ${error.message}`;
+                        }
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error during Firebase setup:", error);
+                document.getElementById('loading-message').textContent = `App setup failed: ${error.message}`;
+            }
+        };
+
+        // Call init immediately
+        window.initFirebase();
+
+        // Global variables and paths
+        window.db = db;
+        window.appId = appId;
+        window.getUserId = () => userId;
+        window.purchaseListContainer = document.getElementById('purchase-list');
+        window.purchasesData = []; // Store fetched purchases locally
+
+        const PUBLIC_PURCHASES_PATH = (appId) => `artifacts/${appId}/public/data/purchases`; 
+
+        // -----------------------------------------------------------
+        // 4. REAL-TIME DATA LISTENER
+        // -----------------------------------------------------------
+        const setupPurchaseListener = () => {
+            const purchasesCollectionRef = collection(db, PUBLIC_PURCHASES_PATH(appId));
+            const q = query(purchasesCollectionRef);
+
+            onSnapshot(q, (snapshot) => {
+                purchasesData = [];
+                snapshot.forEach((doc) => {
+                    purchasesData.push({ id: doc.id, ...doc.data() });
+                });
+                
+                filterAndRenderPurchases(); // Call filtering function when data changes
+                console.log("Real-time purchase data updated.");
+            }, (error) => {
+                console.error("Error setting up purchase listener:", error);
+                purchaseListContainer.innerHTML = `<div class="p-4 bg-red-100 text-red-700 rounded-lg">Error loading purchases: ${error.message}</div>`;
+            });
+        };
+        
+        // -----------------------------------------------------------
+        // 5. FILTER AND RENDER FUNCTION (NEW FOR SEARCH)
+        // -----------------------------------------------------------
+        window.filterAndRenderPurchases = () => {
+            const searchTerm = (document.getElementById('purchase-search')?.value || '').toLowerCase();
+            
+            let filteredList = purchasesData;
+            
+            if (searchTerm) {
+                filteredList = purchasesData.filter(purchase => 
+                    purchase.supplierName.toLowerCase().includes(searchTerm)
+                );
+            }
+
+            window.renderPurchaseList(filteredList);
+        };
+
+
+        // -----------------------------------------------------------
+        // 6. RENDERING FUNCTION
+        // -----------------------------------------------------------
+        window.renderPurchaseList = (purchases) => {
+            const container = document.getElementById('purchase-list');
+            container.innerHTML = ''; // Clear existing list
+
+            if (purchases.length === 0) {
+                container.innerHTML = '<div class="text-center py-10 text-gray-500">No parts purchases entered yet.</div>';
+                return;
+            }
+
+            // Sort by purchaseDate descending
+            purchases.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+            purchases.forEach(purchase => {
+                const isPaid = (purchase.amountPaid || 0) >= (purchase.totalAmount || 0);
+                const paymentStatusColor = isPaid ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+                const paymentStatusText = isPaid ? 'Paid' : 'Pending';
+
+                const purchaseCard = document.createElement('div');
+                purchaseCard.className = 'bg-white p-4 rounded-xl card-shadow transition hover:shadow-lg flex flex-col md:flex-row justify-between items-start md:items-center mb-4 border-l-4 border-indigo-500';
+                purchaseCard.innerHTML = `
+                    <div class="flex-grow w-full md:w-auto mb-3 md:mb-0">
+                        <div class="text-lg font-bold text-indigo-700 truncate">${purchase.supplierName}</div>
+                        <div class="text-sm text-gray-600 mb-1">
+                            <span class="font-medium">Date:</span> ${purchase.purchaseDate}
+                        </div>
+                        <div class="text-sm text-gray-700 mt-2">
+                            <span class="font-semibold">Notes:</span> ${purchase.notes || 'N/A'}
+                        </div>
+                    </div>
+                    
+                    <div class="flex-shrink-0 flex flex-col items-start md:items-end w-full md:w-auto">
+                        <span class="px-3 py-1 text-xs font-semibold rounded-full ${paymentStatusColor} mb-2">${paymentStatusText}</span>
+                        <div class="text-md font-bold text-gray-900">
+                            Total: <span class="text-red-600">₹${(purchase.totalAmount || 0).toLocaleString('en-IN')}</span>
+                        </div>
+                        <div class="text-xs text-gray-500">
+                            Paid: ₹${(purchase.amountPaid || 0).toLocaleString('en-IN')}
+                        </div>
+                        <button onclick="openEditPurchaseModal('${purchase.id}')" class="mt-2 text-indigo-600 hover:text-indigo-800 font-medium text-sm">
+                            <i class="fas fa-edit mr-1"></i> Edit Payment
+                        </button>
+                    </div>
+                `;
+                container.appendChild(purchaseCard);
+            });
+        };
+
+
+        // -----------------------------------------------------------
+        // 7. FORM HANDLER
+        // -----------------------------------------------------------
+        window.handleSubmitPurchase = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const purchaseData = {
+                supplierName: form.supplierName.value,
+                purchaseDate: form.purchaseDate.value,
+                totalAmount: parseFloat(form.totalAmount.value || 0),
+                amountPaid: parseFloat(form.amountPaid.value || 0),
+                notes: form.purchaseNotes.value,
+                createdAt: new Date().toISOString(),
+                createdBy: userId || 'anonymous'
+            };
+
+            const submitBtn = document.getElementById('submit-purchase-btn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Saving...';
+
+            try {
+                const docRef = await addDoc(collection(db, PUBLIC_PURCHASES_PATH(appId)), purchaseData);
+                console.log("Purchase document written with ID: ", docRef.id);
+                form.reset(); 
+                document.getElementById('purchaseDate').value = new Date().toISOString().split('T')[0]; // Reset date to today
+            } catch (e) {
+                console.error("Error adding purchase document: ", e);
+                const errorDiv = document.getElementById('form-error-purchase');
+                errorDiv.textContent = `Error saving purchase: ${e.message}`;
+                errorDiv.classList.remove('hidden');
+                setTimeout(() => errorDiv.classList.add('hidden'), 5000);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Add New Parts Purchase';
+            }
+        };
+
+
+        // -----------------------------------------------------------
+        // 8. EDIT MODAL LOGIC (PURCHASE)
+        // -----------------------------------------------------------
+        window.currentEditingPurchaseId = null;
+
+        window.openEditPurchaseModal = (purchaseId) => {
+            const purchase = purchasesData.find(p => p.id === purchaseId);
+            if (!purchase) return;
+
+            currentEditingPurchaseId = purchaseId;
+
+            document.getElementById('edit-purchase-title').textContent = `Supplier: ${purchase.supplierName} (Date: ${purchase.purchaseDate})`;
+            document.getElementById('edit-totalAmount').value = purchase.totalAmount;
+            document.getElementById('edit-amountPaid').value = purchase.amountPaid;
+
+            document.getElementById('edit-purchase-modal').classList.remove('hidden');
+        };
+
+        window.closeEditPurchaseModal = () => {
+            document.getElementById('edit-purchase-modal').classList.add('hidden');
+            currentEditingPurchaseId = null;
+        };
+
+        window.handleEditPurchase = async (event) => {
+            event.preventDefault();
+            if (!currentEditingPurchaseId) return;
+
+            const form = event.target;
+            const updatedData = {
+                totalAmount: parseFloat(form.edit_totalAmount.value || 0),
+                amountPaid: parseFloat(form.edit_amountPaid.value || 0),
+                updatedAt: new Date().toISOString()
+            };
+
+            const saveBtn = document.getElementById('save-purchase-edit-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Updating...';
+
+            try {
+                const purchaseRef = doc(db, PUBLIC_PURCHASES_PATH(appId), currentEditingPurchaseId);
+                await updateDoc(purchaseRef, updatedData);
+                console.log("Purchase updated successfully:", currentEditingPurchaseId);
+                closeEditPurchaseModal();
+            } catch (e) {
+                console.error("Error updating purchase document: ", e);
+                document.getElementById('edit-purchase-form-error').textContent = `Error updating purchase: ${e.message}`;
+                document.getElementById('edit-purchase-form-error').classList.remove('hidden');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Changes';
+            }
+        };
+
+
+        // -----------------------------------------------------------
+        // 9. REPORT MODAL LOGIC (PURCHASE ONLY)
+        // -----------------------------------------------------------
+        window.openReportModal = () => {
+            document.getElementById('report-modal').classList.remove('hidden');
+            document.getElementById('report-results').innerHTML = '<p class="text-center text-gray-500">Enter dates and click "Generate Report".</p>';
+        };
+
+        window.closeReportModal = () => {
+            document.getElementById('report-modal').classList.add('hidden');
+        };
+
+        window.handleReport = (event) => {
+            event.preventDefault();
+            const fromDateStr = document.getElementById('report-from-date').value;
+            const toDateStr = document.getElementById('report-to-date').value;
+            const supplierFilter = document.getElementById('report-supplier-name').value.toLowerCase().trim();
+            const resultsDiv = document.getElementById('report-results');
+            
+            // if (!fromDateStr || !toDateStr) {
+            //     resultsDiv.innerHTML = '<div class="p-3 bg-red-100 text-red-700 rounded-lg">Please select both start and end dates.</div>';
+            //     return;
+            // }
+
+            // const fromDate = new Date(fromDateStr);
+            // const toDate = new Date(toDateStr);
+            // toDate.setHours(23, 59, 59, 999); 
+            
+            resultsDiv.innerHTML = '<div class="text-center text-indigo-500"><i class="fas fa-spinner fa-spin mr-2"></i> Generating Report...</div>';
+
+            // Set null if date string is empty.
+            const fromDate = fromDateStr ? new Date(fromDateStr) : null;
+            let toDate = null;
+            if (toDateStr) {
+                 toDate = new Date(toDateStr);
+                 // Set to end of the day for inclusive filtering
+                 toDate.setHours(23, 59, 59, 999); 
+            }
+
+            try {
+                // PURCHASE REPORT LOGIC
+                const filteredPurchases = purchasesData.filter(purchase => {
+                    // const purchaseDate = new Date(purchase.purchaseDate); 
+                    
+                    // // NEW: Logic to check if supplier name matches the filter (or if filter is empty)
+                    // const supplierMatch = !supplierFilter || (purchase.supplierName && purchase.supplierName.toLowerCase().includes(supplierFilter));
+                    
+                    // return purchaseDate >= fromDate && purchaseDate <= toDate && supplierMatch;
+
+                    // 1. Supplier Filter
+                    const supplierMatch = !supplierFilter || (purchase.supplierName && purchase.supplierName.toLowerCase().includes(supplierFilter));
+                    
+                    // 2. Date Filter Logic
+                    const purchaseDate = new Date(purchase.purchaseDate); 
+                    
+                    // If the date is null (not entered), the condition is always true, effectively skipping the filter.
+                    const fromMatch = !fromDate || purchaseDate >= fromDate;
+                    const toMatch = !toDate || purchaseDate <= toDate;
+
+                    return fromMatch && toMatch && supplierMatch;
+                });
+                
+                const totalSpent = filteredPurchases.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
+                const totalPaid = filteredPurchases.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
+                const totalPendingPayment = totalSpent - totalPaid;
+
+                resultsDiv.innerHTML = `
+                    <div class="p-4 bg-white rounded-xl border border-indigo-300 card-shadow">
+                        <h3 class="text-xl font-bold text-indigo-700 mb-4 border-b pb-2">Parts Purchase Summary</h3>
+                        
+                        <div class="mb-3">
+                            <p class="text-sm font-medium text-gray-600">Period:</p>
+                            <p class="text-lg font-semibold">${fromDateStr} to ${toDateStr}</p>
+                        </div>
+
+                        <div class="flex flex-col md:flex-row gap-4">
+                            <div class="flex-1 p-3 bg-red-50 border-l-4 border-red-500 rounded-lg">
+                                <p class="text-sm font-medium text-red-700">Total Purchase Cost</p>
+                                <p class="text-2xl font-extrabold text-red-600 mt-1">₹${totalSpent.toLocaleString('en-IN')}</p>
+                            </div>
+                            <div class="flex-1 p-3 bg-yellow-50 border-l-4 border-yellow-500 rounded-lg">
+                                <p class="text-sm font-medium text-yellow-700">Total Pending Payment</p>
+                                <p class="text-2xl font-extrabold text-yellow-600 mt-1">₹${totalPendingPayment.toLocaleString('en-IN')}</p>
+                            </div>
+                        </div>
+
+                        <p class="mt-4 text-xs text-gray-500">Report generated from ${filteredPurchases.length} purchases in this period.</p>
+                    </div>
+                `;
+
+            } catch (e) {
+                console.error("Error generating report: ", e);
+                resultsDiv.innerHTML = `<div class="p-3 bg-red-100 text-red-700 rounded-lg">Report Error: ${e.message}</div>`;
+            }
+        };
+
+
+        // Set default date for input fields on load
+        window.addEventListener('load', () => {
+            const today = new Date().toISOString().split('T')[0];
+            const dateInputPurchase = document.getElementById('purchaseDate');
+            if (dateInputPurchase) dateInputPurchase.value = today;
+        });
+
+    </script>
+
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-8 border-b pb-4">
+            <h1 class="text-4xl font-extrabold text-indigo-800 flex items-center">
+                <i class="fas fa-tools mr-3 text-indigo-500"></i> True Tone Mobiles
+            </h1>
+            </header>
+
+        <div class="flex border-b border-gray-300 mb-8">
+            <a href="repair-jobs.html" id="purchases-tab-btn" onclick="switchTab('jobs')" class="py-3 px-6 text-lg font-semibold border-b-4 border-transparent text-gray-500 hover:text-indigo-600 hover:border-indigo-600 transition duration-150">
+                <i class="fas fa-shopping-cart mr-2"></i> Repair Jobs
+            </a>
+            <button id="jobs-tab-btn" onclick="switchTab('purchases')" class="py-3 px-6 text-lg font-semibold border-b-4 border-indigo-600 text-indigo-600 hover:text-indigo-700 hover:border-indigo-700 transition duration-150">
+                <i class="fas fa-tools mr-2"></i>  Parts Purchases
+            </button>
+        </div>
+        
+        <div id="loading-message" class="text-center py-10 text-indigo-600 text-lg font-medium">
+            <i class="fas fa-sync-alt fa-spin mr-2"></i> Loading...
+        </div>
+
+        <div id="app-content" class="grid grid-cols-1 lg:grid-cols-3 gap-8 hidden">
+            
+             <div class="lg:col-span-1 bg-white p-6 rounded-xl card-shadow h-fit">
+                <h2 class="text-2xl font-bold text-indigo-700 mb-6 border-b pb-3">New Parts Purchase Entry</h2>
+                
+                <div id="form-error-purchase" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form id="new-purchase-form" onsubmit="handleSubmitPurchase(event)">
+                    
+                    <div class="mb-4">
+                        <label for="supplierName" class="block text-sm font-medium text-gray-700">Supplier/Vendor Name</label>
+                        <input type="text" id="supplierName" name="supplierName" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="purchaseDate" class="block text-sm font-medium text-gray-700">Date of Purchase</label>
+                        <input type="date" id="purchaseDate" name="purchaseDate" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+                    
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label for="totalAmount" class="block text-sm font-medium text-gray-700">Total Amount (₹)</label>
+                            <input type="number" id="totalAmount" name="totalAmount" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div>
+                            <label for="amountPaid" class="block text-sm font-medium text-gray-700">Amount Paid (₹)</label>
+                            <input type="number" id="amountPaid" name="amountPaid" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="purchaseNotes" class="block text-sm font-medium text-gray-700">Notes (Optional)</label>
+                        <textarea id="purchaseNotes" name="purchaseNotes" rows="3" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500"></textarea>
+                    </div>
+
+                    <button type="submit" id="submit-purchase-btn" class="w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition duration-150 shadow-md">
+                        <i class="fas fa-plus-circle mr-2"></i> Add New Parts Purchase
+                    </button>
+                </form>
+            </div>
+
+            <div class="lg:col-span-2">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold text-indigo-700">Recent Parts Purchases</h2>
+                    <button onclick="openReportModal()" class="py-2 px-4 bg-green-500 text-white font-semibold rounded-xl hover:bg-green-600 transition duration-150 text-sm">
+                        <i class="fas fa-file-invoice-dollar mr-1"></i> Report
+                    </button>
+                </div>
+                
+                <div class="mb-6">
+                    <input type="text" id="purchase-search" placeholder="Search purchases by Supplier Name..." oninput="filterAndRenderPurchases()" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 border focus:border-indigo-500 focus:ring-indigo-500">
+                </div>
+                
+                <div id="purchase-list" class="space-y-4">
+                    </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="edit-purchase-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-4 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-indigo-700">Edit Purchase Payment Status</h3>
+                    <button onclick="closeEditPurchaseModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <h4 id="edit-purchase-title" class="text-lg font-semibold mb-4 text-gray-800">Purchase Title Placeholder</h4>
+
+                <div id="edit-purchase-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form onsubmit="handleEditPurchase(event)">
+                    
+                    <div class="mb-4">
+                        <label for="edit-totalAmount" class="block text-sm font-medium text-gray-700">Total Purchase Amount (₹)</label>
+                        <input type="number" id="edit-totalAmount" name="edit_totalAmount" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="edit-amountPaid" class="block text-sm font-medium text-gray-700">Amount Paid (₹)</label>
+                        <input type="number" id="edit-amountPaid" name="edit_amountPaid" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+
+                    <button type="submit" id="save-purchase-edit-btn" class="w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition duration-150 shadow-md">
+                        <i class="fas fa-save mr-2"></i> Save Changes
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="report-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-xl card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-6 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-green-700">Purchase Expense Report Generator</h3>
+                    <button onclick="closeReportModal()" class="text-gray-400 hover:text-gray-600">
+                        X
+                    </button>
+                </div>
+                
+                <form onsubmit="handleReport(event)" class="mb-6 p-4 border border-gray-200 rounded-xl bg-gray-50">
+                    <div class="mb-4"> 
+                        <label for="report-supplier-name" class="block text-sm font-medium text-gray-700">Filter by Supplier Name (Optional)</label>
+                        <input type="text" id="report-supplier-name" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500" placeholder="e.g., Apple Parts Inc.">
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label for="report-from-date" class="block text-sm font-medium text-gray-700">From Date</label>
+                            <input type="date" id="report-from-date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
+                        </div>
+                        <div>
+                            <label for="report-to-date" class="block text-sm font-medium text-gray-700">To Date</label>
+                            <input type="date" id="report-to-date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
+                        </div>
+                    </div>
+                    <button type="submit" class="w-full py-3 px-4 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition duration-150 shadow-md">
+                        <i class="fas fa-chart-line mr-2"></i> Generate Report
+                    </button>
+                </form>
+
+                <div id="report-results" class="space-y-3">
+                    </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Ensure the loading message is removed once the app content can be displayed
+        window.addEventListener('load', () => {
+            const loadingMessage = document.getElementById('loading-message');
+            const appContent = document.getElementById('app-content');
+            if (loadingMessage && appContent) {
+                // Give time for Firebase to potentially start the listener
+                setTimeout(() => {
+                    loadingMessage.classList.add('hidden');
+                    appContent.classList.remove('hidden');
+                }, 1000); 
+            }
+        });
+        
+        // Hide initial content until Firebase is ready
+        document.getElementById('app-content').classList.add('hidden');
+    </script>
+</body>
+</html>

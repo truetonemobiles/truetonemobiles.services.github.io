@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mobile Service Center Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://kit.fontawesome.com/a5906d96e5.js" crossorigin="anonymous"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .modal-overlay { background-color: rgba(0, 0, 0, 0.6); }
+        .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <!-- Firebase Imports and Setup -->
+    <script type="module">
+
+        const firebaseConfigObj = {
+            apiKey: "AIzaSyDg2bYPWLDImo6VGMrfZREZJktOiC4nxgo",
+            authDomain: "mobile-repair-tracker.firebaseapp.com",
+            projectId: "mobile-repair-tracker",
+            storageBucket: "mobile-repair-tracker.firebasestorage.app",
+            messagingSenderId: "539581513263",
+            appId: "1:539581513263:web:0e4f16000d271ea79550da",
+            measurementId: "G-53ZS6LKB70"
+        };
+
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, updateDoc, doc, getDocs, where, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let appId = "1:539581513263:web:0e4f16000d271ea79550da";
+
+        // Custom Utility Function to convert base64 to ArrayBuffer (for internal Firebase use if needed, but primarily for auth)
+        function base64ToArrayBuffer(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // Initialize and Authenticate
+        window.initFirebase = async () => {
+            try {
+                // Set Firestore logging level (optional, but good for debugging)
+                setLogLevel('error');
+
+                // 1. Get Configs
+                appId = '1:539581513263:web:0e4f16000d271ea79550da';
+                const firebaseConfig = firebaseConfigObj;
+                const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (!firebaseConfig) {
+                    console.error("Firebase config is missing. Cannot initialize Firestore.");
+                    document.getElementById('loading-message').textContent = 'Error: Firebase configuration missing.';
+                    return;
+                }
+
+                // 2. Initialize App and Services
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Set persistence to local to remember user
+                await setPersistence(auth, browserLocalPersistence);
+
+                // 3. Handle Authentication
+                // Use onAuthStateChanged to manage the user state after initial auth attempt
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        // document.getElementById('auth-status').textContent = `Logged in as: ${userId}`;
+                        console.log("User authenticated:", userId);
+                        // Once authenticated, start listening for job data
+                        setupJobListener();
+                    } else {
+                        // Attempt sign-in if token is provided or sign in anonymously otherwise
+                        try {
+                            if (authToken) {
+                                await signInWithCustomToken(auth, authToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                            document.getElementById('loading-message').textContent = `Authentication failed: ${error.message}`;
+                        }
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error during Firebase setup:", error);
+                document.getElementById('loading-message').textContent = `App setup failed: ${error.message}`;
+            }
+        };
+
+        // Call init immediately
+        window.initFirebase();
+
+        // Global functions (made accessible via window object)
+        window.db = db;
+        window.appId = appId;
+        window.getUserId = () => userId;
+        window.jobListContainer = document.getElementById('job-list');
+        window.jobsData = []; // Store fetched jobs locally
+
+        const PUBLIC_JOBS_PATH = (appId) => `artifacts/${appId}/public/data/jobs`;
+
+        // -----------------------------------------------------------
+        // 4. REAL-TIME DATA LISTENER (onSnapshot)
+        // -----------------------------------------------------------
+        const setupJobListener = () => {
+    
+            const jobsCollectionRef = collection(db, PUBLIC_JOBS_PATH(appId));
+            const q = query(jobsCollectionRef);
+
+            onSnapshot(q, (snapshot) => {
+                jobsData = [];
+                snapshot.forEach((doc) => {
+                    jobsData.push({ id: doc.id, ...doc.data() });
+                });
+                console.log("Fetched jobs:", jobsData);
+                
+                // Remove all Delivered status jobs
+                jobsData = jobsData.filter(job => job.status !== "Delivered");
+
+                renderJobList(jobsData);
+                console.log("Real-time job data updated.");
+            }, (error) => {
+                console.error("Error setting up job listener:", error);
+                // Display error message to user
+                jobListContainer.innerHTML = `<div class="p-4 bg-red-100 text-red-700 rounded-lg">Error loading jobs: ${error.message}</div>`;
+            });
+        };
+
+        // -----------------------------------------------------------
+        // 5. RENDERING FUNCTIONS
+        // -----------------------------------------------------------
+        window.renderJobList = (jobs) => {
+            const container = document.getElementById('job-list');
+            container.innerHTML = ''; // Clear existing list
+
+            if (jobs.length === 0) {
+                container.innerHTML = '<div class="text-center py-10 text-gray-500">No repair jobs entered yet.</div>';
+                return;
+            }
+
+            // Sort by entryDate descending
+            jobs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+            jobs.forEach(job => {
+                const statusColor = {
+                    'Progress': 'bg-yellow-100 text-yellow-800',
+                    'Completed': 'bg-blue-100 text-blue-800',
+                    'Delivered': 'bg-green-100 text-green-800',
+                    'Cancelled': 'bg-red-100 text-red-800'
+                }[job.status] || 'bg-gray-100 text-gray-800';
+
+                const jobCard = document.createElement('div');
+                jobCard.className = 'bg-white p-4 rounded-xl card-shadow transition hover:shadow-lg flex flex-col md:flex-row justify-between items-start md:items-center mb-4 border-l-4 border-indigo-500';
+                jobCard.innerHTML = `
+                    <div class="flex-grow w-full md:w-auto mb-3 md:mb-0">
+                        <div class="text-lg font-bold text-indigo-700 truncate">${job.customerName} - ${job.mobileModel}</div>
+                        <div class="text-sm text-gray-600 mb-1">
+                            <span class="font-medium">Bill:</span> ${job.invoiceNumber} | 
+                            <span class="font-medium">Phone:</span> ${job.mobileNumber} |
+                            <span class="font-medium">Entry:</span> ${job.entryDate}
+                        </div>
+                        <div class="text-sm text-gray-700 mt-2">
+                            <span class="font-semibold">Complaint:</span> ${job.complaint}
+                        </div>
+                    </div>
+                    
+                    <div class="flex-shrink-0 flex flex-col items-start md:items-end w-full md:w-auto">
+                        <span class="px-3 py-1 text-xs font-semibold rounded-full ${statusColor} mb-2">${job.status}</span>
+                        <div class="text-md font-bold text-gray-900">
+                            Charge: <span class="text-green-600">₹${(job.totalServiceCharge || 0).toLocaleString('en-IN')}</span>
+                        </div>
+                        <div class="text-xs text-gray-500">
+                            Advance: ₹${(job.advanceAmount || 0).toLocaleString('en-IN')}
+                        </div>
+                        <button onclick="openEditModal('${job.id}')" class="mt-2 text-indigo-600 hover:text-indigo-800 font-medium text-sm">
+                            <i class="fas fa-edit mr-1"></i> Edit Status
+                        </button>
+                    </div>
+                `;
+                container.appendChild(jobCard);
+            });
+        };
+
+        // -----------------------------------------------------------
+        // 6. FORM HANDLERS
+        // -----------------------------------------------------------
+        window.handleSubmitJob = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const jobData = {
+                invoiceNumber: form.invoiceNumber.value,
+                customerName: form.customerName.value,
+                mobileNumber: form.mobileNumber.value,
+                mobileModel: form.mobileModel.value,
+                complaint: form.complaint.value,
+                entryDate: form.entryDate.value,
+                advanceAmount: parseFloat(form.advanceAmount.value || 0),
+                totalServiceCharge: parseFloat(form.totalServiceCharge.value || 0),
+                status: 'Progress',
+                createdAt: new Date().toISOString(),
+                createdBy: userId || 'anonymous'
+            };
+
+            const submitBtn = document.getElementById('submit-job-btn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Saving...';
+
+            try {
+                console.log('Before setup listener -> db:', db, 'appId:', appId);
+
+                const docRef = await addDoc(collection(db, PUBLIC_JOBS_PATH(appId)), jobData);
+                console.log("Document written with ID: ", docRef.id);
+                form.reset(); // Clear the form
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                // Show custom error message
+                const errorDiv = document.getElementById('form-error');
+                errorDiv.textContent = `Error saving job: ${e.message}`;
+                errorDiv.classList.remove('hidden');
+                setTimeout(() => errorDiv.classList.add('hidden'), 5000);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Add New Repair Job';
+            }
+        };
+
+        // -----------------------------------------------------------
+        // 7. EDIT MODAL LOGIC
+        // -----------------------------------------------------------
+        window.currentEditingJobId = null;
+
+        window.openEditModal = (jobId) => {
+            const job = jobsData.find(j => j.id === jobId);
+            if (!job) return;
+
+            currentEditingJobId = jobId;
+
+            document.getElementById('edit-job-title').textContent = `${job.customerName} - ${job.mobileModel} (Bill: ${job.invoiceNumber})`;
+            document.getElementById('edit-totalServiceCharge').value = job.totalServiceCharge;
+            document.getElementById('edit-status').value = job.status;
+
+            document.getElementById('edit-modal').classList.remove('hidden');
+        };
+
+        window.closeEditModal = () => {
+            document.getElementById('edit-modal').classList.add('hidden');
+            currentEditingJobId = null;
+        };
+
+        window.handleEditJob = async (event) => {
+            event.preventDefault();
+            if (!currentEditingJobId) return;
+
+            const form = event.target;
+            const updatedData = {
+                totalServiceCharge: parseFloat(form.edit_totalServiceCharge.value || 0),
+                status: form.edit_status.value,
+                updatedAt: new Date().toISOString()
+            };
+
+            const saveBtn = document.getElementById('save-edit-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Updating...';
+
+            try {
+                const jobRef = doc(db, PUBLIC_JOBS_PATH(appId), currentEditingJobId);
+                await updateDoc(jobRef, updatedData);
+                console.log("Job updated successfully:", currentEditingJobId);
+                closeEditModal();
+            } catch (e) {
+                console.error("Error updating document: ", e);
+                // Show error in modal
+                document.getElementById('edit-form-error').textContent = `Error updating job: ${e.message}`;
+                document.getElementById('edit-form-error').classList.remove('hidden');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Changes';
+            }
+        };
+
+        // -----------------------------------------------------------
+        // 8. SEARCH MODAL LOGIC
+        // -----------------------------------------------------------
+        window.openSearchModal = () => {
+            document.getElementById('search-results').innerHTML = ''; // Clear previous results
+            document.getElementById('search-modal').classList.remove('hidden');
+        };
+
+        window.closeSearchModal = () => {
+            document.getElementById('search-modal').classList.add('hidden');
+        };
+
+        window.handleSearch = async (event) => {
+            event.preventDefault();
+            const queryValue = document.getElementById('search-query').value.trim();
+            const searchBy = document.getElementById('search-by').value;
+            const resultsDiv = document.getElementById('search-results');
+            resultsDiv.innerHTML = '<div class="text-center text-indigo-500"><i class="fas fa-spinner fa-spin mr-2"></i> Searching...</div>';
+
+            if (!queryValue) {
+                resultsDiv.innerHTML = '<div class="p-3 bg-red-100 text-red-700 rounded-lg">Please enter a search query.</div>';
+                return;
+            }
+
+            try {
+                const jobsCollectionRef = collection(db, PUBLIC_JOBS_PATH(appId));
+                let q;
+
+                // Firestore requires exact match for simple 'where' queries, so we search by specific fields
+                // Note: The fields are indexed for standard querying.
+                switch (searchBy) {
+                    case 'invoice':
+                        q = query(jobsCollectionRef, where("invoiceNumber", "==", queryValue));
+                        break;
+                    case 'name':
+                        // Use startsWith for approximate name search (requires client-side filtering or advanced indexing for robust search, using simple query for now)
+                        q = query(jobsCollectionRef); 
+                        break;
+                    case 'mobile':
+                        q = query(jobsCollectionRef, where("mobileNumber", "==", queryValue));
+                        break;
+                    default:
+                        throw new Error("Invalid search field.");
+                }
+
+                const querySnapshot = await getDocs(q);
+                let results = [];
+                querySnapshot.forEach(doc => {
+                    results.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Client-side filtering for 'name' (since Firestore doesn't support startsWith well)
+                if (searchBy === 'name') {
+                    const lowerQuery = queryValue.toLowerCase();
+                    results = results.filter(job => job.customerName.toLowerCase().includes(lowerQuery));
+                }
+
+
+                if (results.length === 0) {
+                    resultsDiv.innerHTML = '<div class="text-center py-5 text-gray-500">No jobs found matching your criteria.</div>';
+                } else {
+                    resultsDiv.innerHTML = '';
+                    results.forEach(job => {
+                        const statusColor = job.status === 'Delivered' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800';
+                        resultsDiv.innerHTML += `
+                            <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200 mb-2">
+                                <div class="flex justify-between items-center">
+                                    <div class="font-bold text-indigo-700">${job.customerName} (Bill: ${job.invoiceNumber})</div>
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full ${statusColor}">${job.status}</span>
+                                </div>
+                                <p class="text-sm text-gray-600">Model: ${job.mobileModel} | Phone: ${job.mobileNumber}</p>
+                                <p class="text-xs text-gray-500 mt-1">Complaint: ${job.complaint}</p>
+                                <p class="text-md font-semibold mt-2 text-green-700">Service Charge: ₹${(job.totalServiceCharge || 0).toLocaleString('en-IN')}</p>
+                            </div>
+                        `;
+                    });
+                }
+            } catch (e) {
+                console.error("Error during search: ", e);
+                resultsDiv.innerHTML = `<div class="p-3 bg-red-100 text-red-700 rounded-lg">Search Error: ${e.message}</div>`;
+            }
+        };
+
+        // -----------------------------------------------------------
+        // 9. REPORT MODAL LOGIC
+        // -----------------------------------------------------------
+        window.openReportModal = () => {
+            document.getElementById('report-modal').classList.remove('hidden');
+            document.getElementById('report-results').innerHTML = '<p class="text-center text-gray-500">Enter dates and click "Generate Report".</p>';
+        };
+
+        window.closeReportModal = () => {
+            document.getElementById('report-modal').classList.add('hidden');
+        };
+
+        window.handleReport = (event) => {
+            event.preventDefault();
+            const fromDateStr = document.getElementById('report-from-date').value;
+            const toDateStr = document.getElementById('report-to-date').value;
+            const resultsDiv = document.getElementById('report-results');
+            
+            if (!fromDateStr || !toDateStr) {
+                resultsDiv.innerHTML = '<div class="p-3 bg-red-100 text-red-700 rounded-lg">Please select both start and end dates.</div>';
+                return;
+            }
+
+            const fromDate = new Date(fromDateStr);
+            const toDate = new Date(toDateStr);
+            // Set toDate to end of the day for inclusive search
+            toDate.setHours(23, 59, 59, 999); 
+            
+            resultsDiv.innerHTML = '<div class="text-center text-indigo-500"><i class="fas fa-spinner fa-spin mr-2"></i> Generating Report... (Processing current real-time data)</div>';
+
+            try {
+                // Filter the already loaded real-time jobsData array
+                const filteredJobs = jobsData.filter(job => {
+                    const jobDate = new Date(job.entryDate); // Assuming entryDate is YYYY-MM-DD
+                    return jobDate >= fromDate && jobDate <= toDate;
+                });
+
+                // Calculate the total service charge for jobs that are delivered (or completed, as per business logic)
+                const totalCharge = filteredJobs.reduce((sum, job) => {
+                    // Only count service charge from Delivered or Completed jobs for "money received" report
+                    if (job.status === 'Delivered' || job.status === 'Completed') {
+                        return sum + (job.totalServiceCharge || 0);
+                    }
+                    return sum;
+                }, 0);
+                
+                // Calculate total pending amount (Total Charge - Advance) for Progress jobs
+                const totalPending = filteredJobs.reduce((sum, job) => {
+                     if (job.status === 'Progress' || job.status === 'Completed') {
+                        return sum + ((job.totalServiceCharge || 0) - (job.advanceAmount || 0));
+                    }
+                    return sum;
+                }, 0);
+
+
+                resultsDiv.innerHTML = `
+                    <div class="p-4 bg-white rounded-xl border border-indigo-300 card-shadow">
+                        <h3 class="text-xl font-bold text-indigo-700 mb-4 border-b pb-2">Service Charge Summary</h3>
+                        
+                        <div class="mb-3">
+                            <p class="text-sm font-medium text-gray-600">Period:</p>
+                            <p class="text-lg font-semibold">${fromDateStr} to ${toDateStr}</p>
+                        </div>
+
+                        <div class="flex flex-col md:flex-row gap-4">
+                            <div class="flex-1 p-3 bg-green-50 border-l-4 border-green-500 rounded-lg">
+                                <p class="text-sm font-medium text-green-700">Total Charge (Completed/Delivered Jobs)</p>
+                                <p class="text-2xl font-extrabold text-green-600 mt-1">₹${totalCharge.toLocaleString('en-IN')}</p>
+                            </div>
+                            <div class="flex-1 p-3 bg-yellow-50 border-l-4 border-yellow-500 rounded-lg">
+                                <p class="text-sm font-medium text-yellow-700">Total Pending Balance (Progress/Completed Jobs)</p>
+                                <p class="text-2xl font-extrabold text-yellow-600 mt-1">₹${totalPending.toLocaleString('en-IN')}</p>
+                            </div>
+                        </div>
+
+                        <p class="mt-4 text-xs text-gray-500">Report generated from ${filteredJobs.length} jobs entered in this period.</p>
+                    </div>
+                `;
+
+            } catch (e) {
+                console.error("Error generating report: ", e);
+                resultsDiv.innerHTML = `<div class="p-3 bg-red-100 text-red-700 rounded-lg">Report Error: ${e.message}</div>`;
+            }
+        };
+
+        // ===========================================================
+        // 7. TAB SWITCHING LOGIC
+        // ===========================================================
+        window.switchTab = (tabName) => {
+            const tabs = ['jobs', 'purchases'];
+            tabs.forEach(tab => {
+                const btn = document.getElementById(`${tab}-tab-btn`);
+                const content = document.getElementById(`${tab}-tab-content`);
+
+                if (tab === tabName) {
+                    // Activate tab
+                    content.classList.remove('hidden');
+                    
+                    // Update button style: Jobs is indigo, Purchases is teal.
+                    if (tab === 'jobs') {
+                        btn.classList.add('border-indigo-600', 'text-indigo-600');
+                        btn.classList.remove('border-transparent', 'text-gray-500', 'hover:text-teal-600', 'hover:border-teal-600');
+                    } else { // purchases
+                        btn.classList.add('border-teal-600', 'text-teal-600');
+                        btn.classList.remove('border-transparent', 'text-gray-500', 'hover:text-indigo-600', 'hover:border-indigo-600');
+                    }
+                } else {
+                    // Deactivate tab
+                    content.classList.add('hidden');
+                    btn.classList.add('border-transparent', 'text-gray-500');
+                    btn.classList.remove('border-indigo-600', 'text-indigo-600', 'border-teal-600', 'text-teal-600');
+                }
+            });
+        };
+
+
+        // Set default date for input fields on load
+        window.addEventListener('load', () => {
+            const today = new Date().toISOString().split('T')[0];
+            const dateInput = document.getElementById('entryDate');
+            if (dateInput) dateInput.value = today;
+        });
+
+    </script>
+
+    <!-- Main Application Container -->
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-8 border-b pb-4">
+            <h1 class="text-4xl font-extrabold text-indigo-800 flex items-center">
+                <i class="fas fa-tools mr-3 text-indigo-500"></i> True Tone Mobiles
+            </h1>
+            <!-- <p id="auth-status" class="text-sm text-gray-500 mt-1">Loading authentication...</p> -->
+        </header>
+
+        <div class="flex border-b border-gray-300 mb-8">
+            <button id="jobs-tab-btn" onclick="switchTab('jobs')" class="py-3 px-6 text-lg font-semibold border-b-4 border-indigo-600 text-indigo-600 hover:text-indigo-700 hover:border-indigo-700 transition duration-150">
+                <i class="fas fa-tools mr-2"></i> Repair Jobs
+            </button>
+            <a href="parts-purchases.html" class="py-3 px-6 text-lg font-semibold border-b-4 border-transparent text-gray-500 hover:text-indigo-600 hover:border-indigo-600 transition duration-150">
+                <i class="fas fa-shopping-cart mr-2"></i> Parts Purchases
+            </a>
+        </div>
+        
+        <!-- Loading Indicator -->
+        <div id="loading-message" class="text-center py-10 text-indigo-600 text-lg font-medium">
+            <i class="fas fa-sync-alt fa-spin mr-2"></i> Loading...
+        </div>
+
+        <div id="app-content" class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- Column 1: New Job Entry Form -->
+            <div class="lg:col-span-1 bg-white p-6 rounded-xl card-shadow h-fit">
+                <h2 class="text-2xl font-bold text-indigo-700 mb-6 border-b pb-3">New Service Job Entry</h2>
+                
+                <div id="form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form id="new-job-form" onsubmit="handleSubmitJob(event)">
+                    
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label for="invoiceNumber" class="block text-sm font-medium text-gray-700">Invoice/Bill No.</label>
+                            <input type="text" id="invoiceNumber" name="invoiceNumber" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div>
+                            <label for="entryDate" class="block text-sm font-medium text-gray-700">Entry Date</label>
+                            <input type="date" id="entryDate" name="entryDate" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="customerName" class="block text-sm font-medium text-gray-700">Customer Name</label>
+                        <input type="text" id="customerName" name="customerName" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="mobileNumber" class="block text-sm font-medium text-gray-700">Customer Mobile No.</label>
+                        <!-- <input type="tel" id="mobileNumber" name="mobileNumber" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500"> -->
+                         <input type="tel" id="mobileNumber" name="mobileNumber" required 
+    pattern="\d{10}" maxlength="10" title="Mobile number must be exactly 10 digits." 
+    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+
+                    <div class="mb-4">
+                        <label for="mobileModel" class="block text-sm font-medium text-gray-700">Mobile Model No.</label>
+                        <input type="text" id="mobileModel" name="mobileModel" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+
+                    <div class="mb-4">
+                        <label for="complaint" class="block text-sm font-medium text-gray-700">Complaint Description</label>
+                        <textarea id="complaint" name="complaint" rows="3" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500"></textarea>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                        <div>
+                            <label for="advanceAmount" class="block text-sm font-medium text-gray-700">Advance Amount (₹)</label>
+                            <input type="number" id="advanceAmount" name="advanceAmount" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div>
+                            <label for="totalServiceCharge" class="block text-sm font-medium text-gray-700">Est. Total Charge (₹)</label>
+                            <input type="number" id="totalServiceCharge" name="totalServiceCharge" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                    </div>
+
+                    <button type="submit" id="submit-job-btn" class="w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition duration-150 shadow-md">
+                        <i class="fas fa-plus-circle mr-2"></i> Add New Repair Job
+                    </button>
+                </form>
+            </div>
+
+            <!-- Column 2 & 3: Job List and Actions -->
+            <div class="lg:col-span-2">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold text-indigo-700">Live Repair Status</h2>
+                    <div class="space-x-2">
+                        <button onclick="openSearchModal()" class="py-2 px-4 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150 text-sm">
+                            <i class="fas fa-search mr-1"></i> Search Work
+                        </button>
+                        <button onclick="openReportModal()" class="py-2 px-4 bg-green-500 text-white font-semibold rounded-xl hover:bg-green-600 transition duration-150 text-sm">
+                            <i class="fas fa-file-invoice-dollar mr-1"></i> Report
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Job List -->
+                <div id="job-list" class="space-y-4">
+                    <!-- Jobs will be rendered here by JavaScript -->
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- -----------------------------------------------------------
+    EDIT JOB MODAL (Separated for clarity)
+    ----------------------------------------------------------- -->
+    <div id="edit-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-4 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-indigo-700">Edit Job Status</h3>
+                    <button onclick="closeEditModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <h4 id="edit-job-title" class="text-lg font-semibold mb-4 text-gray-800">Job Title Placeholder</h4>
+
+                <div id="edit-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form onsubmit="handleEditJob(event)">
+                    <div class="mb-4">
+                        <label for="edit-status" class="block text-sm font-medium text-gray-700">Update Status</label>
+                        <select id="edit-status" name="edit_status" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                            <option value="Progress">Progress (In Repair)</option>
+                            <option value="Completed">Completed (Ready for Pickup)</option>
+                            <option value="Delivered">Delivered (Paid & Picked Up)</option>
+                            <option value="Cancelled">Cancelled</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="edit-totalServiceCharge" class="block text-sm font-medium text-gray-700">Final Total Service Charge (₹)</label>
+                        <input type="number" id="edit-totalServiceCharge" name="edit_totalServiceCharge" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+
+                    <button type="submit" id="save-edit-btn" class="w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition duration-150 shadow-md">
+                        <i class="fas fa-save mr-2"></i> Save Changes
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- -----------------------------------------------------------
+    SEARCH MODAL (Separated for clarity)
+    ----------------------------------------------------------- -->
+    <div id="search-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-2xl card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-6 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-indigo-700">Search Repair Jobs</h3>
+                    <button onclick="closeSearchModal()" class="text-gray-400 hover:text-gray-600">
+                        X
+                        <!-- <i class="fas fa-times text-xl"></i> -->
+                    </button>
+                </div>
+                
+                <form onsubmit="handleSearch(event)" class="mb-6 flex space-x-3">
+                    <div class="flex-grow">
+                        <label for="search-query" class="sr-only">Search Query</label>
+                        <input type="text" id="search-query" placeholder="Enter Bill No., Name, or Mobile No." required class="block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                    </div>
+                    <div class="flex-shrink-0">
+                        <label for="search-by" class="sr-only">Search By</label>
+                        <select id="search-by" class="block rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                            <option value="invoice">Bill No.</option>
+                            <option value="name">Customer Name</option>
+                            <option value="mobile">Mobile No.</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="bg-indigo-600 text-white font-semibold rounded-xl px-4 hover:bg-indigo-700 transition duration-150">
+                        <i class="fas fa-search"></i>
+                    </button>
+                </form>
+
+                <h4 class="text-lg font-semibold mb-3 border-b pb-1">Search Results</h4>
+                <div id="search-results" class="space-y-3 max-h-96 overflow-y-auto">
+                    <!-- Results rendered here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- -----------------------------------------------------------
+    REPORT MODAL (Separated for clarity)
+    ----------------------------------------------------------- -->
+    <div id="report-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-xl card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-6 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-green-700">Service Charge Report</h3>
+                    <button onclick="closeReportModal()" class="text-gray-400 hover:text-gray-600">
+                        X
+                        <!-- <i class="fas fa-times text-xl"></i> -->
+                    </button>
+                    <!-- <button onclick="closeReportModal()" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600 z-10 p-2">
+                <i class="fas fa-times text-lg"></i> -->
+            </button>
+                </div>
+                
+                <form onsubmit="handleReport(event)" class="mb-6 p-4 border border-gray-200 rounded-xl bg-gray-50">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label for="report-from-date" class="block text-sm font-medium text-gray-700">From Entry Date</label>
+                            <input type="date" id="report-from-date" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
+                        </div>
+                        <div>
+                            <label for="report-to-date" class="block text-sm font-medium text-gray-700">To Entry Date</label>
+                            <input type="date" id="report-to-date" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
+                        </div>
+                    </div>
+                    <button type="submit" class="w-full py-3 px-4 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition duration-150 shadow-md">
+                        <i class="fas fa-chart-line mr-2"></i> Generate Report
+                    </button>
+                </form>
+
+                <div id="report-results" class="space-y-3">
+                    <!-- Report results rendered here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Ensure the loading message is removed once the app content can be displayed
+        window.addEventListener('load', () => {
+            const loadingMessage = document.getElementById('loading-message');
+            const appContent = document.getElementById('app-content');
+            if (loadingMessage && appContent) {
+                // This will run after initFirebase finishes and the listener starts populating data
+                setTimeout(() => {
+                    loadingMessage.classList.add('hidden');
+                    appContent.classList.remove('hidden');
+                }, 1000); // Give 1 second for Firebase to potentially start the listener
+            }
+        });
+        
+        // Hide initial content until Firebase is ready
+        document.getElementById('app-content').classList.add('hidden');
+    </script>
+</body>
+</html>
