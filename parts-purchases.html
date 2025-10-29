@@ -29,7 +29,7 @@
 
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, updateDoc, doc, getDocs, where, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, updateDoc, doc, getDocs, where, getDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global Firebase variables
@@ -91,7 +91,7 @@
         window.appId = appId;
         window.getUserId = () => userId;
         window.purchaseListContainer = document.getElementById('purchase-list');
-        window.purchasesData = []; // Store fetched purchases locally
+        window.purchasesData = []; // Store fetched purchases locally (Now represents aggregated accounts)
 
         const PUBLIC_PURCHASES_PATH = (appId) => `artifacts/${appId}/public/data/purchases`; 
 
@@ -109,7 +109,7 @@
                 });
                 
                 filterAndRenderPurchases(); // Call filtering function when data changes
-                console.log("Real-time purchase data updated.");
+                console.log("Real-time purchase account data updated.");
             }, (error) => {
                 console.error("Error setting up purchase listener:", error);
                 purchaseListContainer.innerHTML = `<div class="p-4 bg-red-100 text-red-700 rounded-lg">Error loading purchases: ${error.message}</div>`;
@@ -117,7 +117,7 @@
         };
         
         // -----------------------------------------------------------
-        // 5. FILTER AND RENDER FUNCTION (NEW FOR SEARCH)
+        // 5. FILTER AND RENDER FUNCTION (FOR SEARCH)
         // -----------------------------------------------------------
         window.filterAndRenderPurchases = () => {
             const searchTerm = (document.getElementById('purchase-search')?.value || '').toLowerCase();
@@ -142,42 +142,55 @@
             container.innerHTML = ''; // Clear existing list
 
             if (purchases.length === 0) {
-                container.innerHTML = '<div class="text-center py-10 text-gray-500">No parts purchases entered yet.</div>';
+                container.innerHTML = '<div class="text-center py-10 text-gray-500">No parts supplier accounts entered yet.</div>';
                 return;
             }
 
-            // Sort by purchaseDate descending
+            // Sort by creation date descending
             purchases.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
             purchases.forEach(purchase => {
-                const isPaid = (purchase.amountPaid || 0) >= (purchase.totalAmount || 0);
+                const totalAmount = purchase.totalAmount || 0;
+                const amountPaid = purchase.amountPaid || 0;
+                const pendingAmount = totalAmount - amountPaid;
+                
+                const isPaid = pendingAmount <= 0;
                 const paymentStatusColor = isPaid ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
-                const paymentStatusText = isPaid ? 'Paid' : 'Pending';
+                const paymentStatusText = isPaid ? 'Paid Off' : 'Pending';
 
                 const purchaseCard = document.createElement('div');
+                purchaseCard.id = `account-${purchase.id}`; // Add ID for easy access in JS
                 purchaseCard.className = 'bg-white p-4 rounded-xl card-shadow transition hover:shadow-lg flex flex-col md:flex-row justify-between items-start md:items-center mb-4 border-l-4 border-indigo-500';
                 purchaseCard.innerHTML = `
                     <div class="flex-grow w-full md:w-auto mb-3 md:mb-0">
-                        <div class="text-lg font-bold text-indigo-700 truncate">${purchase.supplierName}</div>
+                        <div class="text-lg font-bold text-indigo-700 truncate">${purchase.supplierName} (Account)</div>
                         <div class="text-sm text-gray-600 mb-1">
-                            <span class="font-medium">Date:</span> ${purchase.purchaseDate}
+                            <span class="font-medium">Account Created:</span> ${purchase.purchaseDate}
                         </div>
                         <div class="text-sm text-gray-700 mt-2">
-                            <span class="font-semibold">Notes:</span> ${purchase.notes || 'N/A'}
+                            <span class="font-semibold">Initial Notes:</span> ${purchase.notes || 'N/A'}
                         </div>
                     </div>
                     
                     <div class="flex-shrink-0 flex flex-col items-start md:items-end w-full md:w-auto">
                         <span class="px-3 py-1 text-xs font-semibold rounded-full ${paymentStatusColor} mb-2">${paymentStatusText}</span>
                         <div class="text-md font-bold text-gray-900">
-                            Total: <span class="text-red-600">₹${(purchase.totalAmount || 0).toLocaleString('en-IN')}</span>
+                            Total Due: <span class="text-red-600">₹${totalAmount.toLocaleString('en-IN')}</span>
                         </div>
-                        <div class="text-xs text-gray-500">
-                            Paid: ₹${(purchase.amountPaid || 0).toLocaleString('en-IN')}
+                        <div class="text-xs text-gray-500 mb-2">
+                            Total Paid: ₹${amountPaid.toLocaleString('en-IN')} | <span class="text-yellow-600 font-semibold">Pending: ₹${pendingAmount.toLocaleString('en-IN')}</span>
                         </div>
-                        <button onclick="openEditPurchaseModal('${purchase.id}')" class="mt-2 text-indigo-600 hover:text-indigo-800 font-medium text-sm">
-                            <i class="fas fa-edit mr-1"></i> Edit Payment
-                        </button>
+                        <div class="flex space-x-2">
+                            <button onclick="openAddPaymentModal('${purchase.id}')" class="text-green-600 hover:text-green-800 font-medium text-sm border border-green-300 py-1 px-2 rounded-lg">
+                                <i class="fas fa-money-check-alt mr-1"></i> Record Payment
+                            </button>
+                             <button onclick="openEditPurchaseModal('${purchase.id}')" class="text-indigo-600 hover:text-indigo-800 font-medium text-sm border border-indigo-300 py-1 px-2 rounded-lg">
+                                <i class="fas fa-edit mr-1"></i> Edit Account
+                            </button>
+                            <button onclick="openDeleteConfirmationModal('${purchase.id}')" class="text-gray-600 hover:text-red-700 font-medium text-sm border border-gray-300 py-1 px-2 rounded-lg">
+                                <i class="fas fa-trash-alt mr-1"></i> Delete Account
+                            </button>
+                        </div>
                     </div>
                 `;
                 container.appendChild(purchaseCard);
@@ -186,45 +199,109 @@
 
 
         // -----------------------------------------------------------
-        // 7. FORM HANDLER
+        // 7. FORM HANDLER (UPDATED FOR SERIAL NUMBER)
         // -----------------------------------------------------------
         window.handleSubmitPurchase = async (event) => {
             event.preventDefault();
             const form = event.target;
-            const purchaseData = {
-                supplierName: form.supplierName.value,
-                purchaseDate: form.purchaseDate.value,
-                totalAmount: parseFloat(form.totalAmount.value || 0),
-                amountPaid: parseFloat(form.amountPaid.value || 0),
-                notes: form.purchaseNotes.value,
-                createdAt: new Date().toISOString(),
-                createdBy: userId || 'anonymous'
-            };
+            const supplierName = form.supplierName.value.trim();
+            const errorDiv = document.getElementById('form-error-purchase');
+            
+            const purchaseDate = form.purchaseDate.value;
+            const newTotalAmount = parseFloat(form.totalAmount.value || 0);
+            const newAmountPaid = parseFloat(form.amountPaid.value || 0);
+            const notes = form.purchaseNotes.value;
 
             const submitBtn = document.getElementById('submit-purchase-btn');
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Saving...';
+            submitBtn.textContent = 'Processing...';
+            errorDiv.classList.add('hidden');
+            errorDiv.classList.remove('bg-red-100', 'text-red-700', 'bg-blue-100', 'text-blue-700', 'bg-green-100', 'text-green-700'); // Reset colors
+
+            // --- SERIAL NUMBER GENERATION ---
+            const serialNumber = 'PUR-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+
+            // New Purchase Transaction Object
+            const purchaseTransaction = {
+                type: 'purchase',
+                date: purchaseDate,
+                amount: newTotalAmount,
+                initialPaid: newAmountPaid,
+                serialNumber: serialNumber, // NEW FIELD
+                status: 'active', // NEW FIELD (Active, Cancelled)
+                notes: `Purchase ${serialNumber} added on ${purchaseDate}. Total: ₹${newTotalAmount.toLocaleString('en-IN')}. Initial Paid: ₹${newAmountPaid.toLocaleString('en-IN')}. Notes: ${notes || 'N/A'}.`,
+                createdAt: new Date().toISOString()
+            };
+
 
             try {
-                const docRef = await addDoc(collection(db, PUBLIC_PURCHASES_PATH(appId)), purchaseData);
-                console.log("Purchase document written with ID: ", docRef.id);
+                const purchasesCollectionRef = collection(db, PUBLIC_PURCHASES_PATH(appId));
+                
+                // 1. Check for existing vendor account
+                const q = query(purchasesCollectionRef, where("supplierName", "==", supplierName));
+                const querySnapshot = await getDocs(q);
+
+                if (!querySnapshot.empty) {
+                    // 2. EXISTING VENDOR FOUND (Update the running account and history)
+                    const existingDoc = querySnapshot.docs[0];
+                    const existingData = existingDoc.data();
+                    const existingTotal = existingData.totalAmount || 0;
+                    const existingPaid = existingData.amountPaid || 0;
+                    const existingHistory = existingData.history || [];
+
+                    const updatedData = {
+                        totalAmount: existingTotal + newTotalAmount,
+                        amountPaid: existingPaid + newAmountPaid,
+                        history: [...existingHistory, purchaseTransaction], // Append new transaction
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    await updateDoc(doc(db, PUBLIC_PURCHASES_PATH(appId), existingDoc.id), updatedData);
+                    console.log("Existing account updated with new purchase:", serialNumber);
+
+                    errorDiv.textContent = `New purchase (${serialNumber}, Total: ₹${newTotalAmount.toLocaleString('en-IN')}) added to the existing account for ${supplierName}.`;
+                    errorDiv.classList.remove('hidden');
+                    errorDiv.classList.add('bg-blue-100', 'text-blue-700');
+
+                } else {
+                    // 3. NEW VENDOR (Create a new account/first purchase)
+                    const purchaseData = {
+                        supplierName: supplierName,
+                        purchaseDate: purchaseDate, // Date of first entry
+                        totalAmount: newTotalAmount,
+                        amountPaid: newAmountPaid,
+                        notes: notes,
+                        history: [purchaseTransaction], // Initialize history with the first transaction
+                        createdAt: new Date().toISOString(),
+                        createdBy: userId || 'anonymous'
+                    };
+
+                    const docRef = await addDoc(purchasesCollectionRef, purchaseData);
+                    console.log("New account created for vendor with ID: ", docRef.id);
+                    
+                    errorDiv.textContent = `New supplier account for ${supplierName} successfully created. First purchase: ${serialNumber}.`;
+                    errorDiv.classList.remove('hidden');
+                    errorDiv.classList.add('bg-green-100', 'text-green-700');
+                }
+
                 form.reset(); 
                 document.getElementById('purchaseDate').value = new Date().toISOString().split('T')[0]; // Reset date to today
+
             } catch (e) {
-                console.error("Error adding purchase document: ", e);
-                const errorDiv = document.getElementById('form-error-purchase');
-                errorDiv.textContent = `Error saving purchase: ${e.message}`;
+                console.error("Error processing purchase: ", e);
+                errorDiv.textContent = `Error processing purchase: ${e.message}`;
                 errorDiv.classList.remove('hidden');
-                setTimeout(() => errorDiv.classList.add('hidden'), 5000);
+                errorDiv.classList.add('bg-red-100', 'text-red-700');
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.textContent = 'Add New Parts Purchase';
+                setTimeout(() => errorDiv.classList.add('hidden'), 5000);
             }
         };
 
 
         // -----------------------------------------------------------
-        // 8. EDIT MODAL LOGIC (PURCHASE)
+        // 8. EDIT MODAL LOGIC (ACCOUNT CORRECTION)
         // -----------------------------------------------------------
         window.currentEditingPurchaseId = null;
 
@@ -233,8 +310,9 @@
             if (!purchase) return;
 
             currentEditingPurchaseId = purchaseId;
+            const pendingAmount = (purchase.totalAmount || 0) - (purchase.amountPaid || 0);
 
-            document.getElementById('edit-purchase-title').textContent = `Supplier: ${purchase.supplierName} (Date: ${purchase.purchaseDate})`;
+            document.getElementById('edit-purchase-title').textContent = `Supplier: ${purchase.supplierName} (Pending: ₹${pendingAmount.toLocaleString('en-IN')})`;
             document.getElementById('edit-totalAmount').value = purchase.totalAmount;
             document.getElementById('edit-amountPaid').value = purchase.amountPaid;
 
@@ -252,6 +330,7 @@
 
             const form = event.target;
             const updatedData = {
+                // Allows direct correction of Total Amount and Paid Amount
                 totalAmount: parseFloat(form.edit_totalAmount.value || 0),
                 amountPaid: parseFloat(form.edit_amountPaid.value || 0),
                 updatedAt: new Date().toISOString()
@@ -264,11 +343,11 @@
             try {
                 const purchaseRef = doc(db, PUBLIC_PURCHASES_PATH(appId), currentEditingPurchaseId);
                 await updateDoc(purchaseRef, updatedData);
-                console.log("Purchase updated successfully:", currentEditingPurchaseId);
+                console.log("Account totals updated successfully (Correction):", currentEditingPurchaseId);
                 closeEditPurchaseModal();
             } catch (e) {
-                console.error("Error updating purchase document: ", e);
-                document.getElementById('edit-purchase-form-error').textContent = `Error updating purchase: ${e.message}`;
+                console.error("Error updating account totals: ", e);
+                document.getElementById('edit-purchase-form-error').textContent = `Error updating account totals: ${e.message}`;
                 document.getElementById('edit-purchase-form-error').classList.remove('hidden');
             } finally {
                 saveBtn.disabled = false;
@@ -278,93 +357,530 @@
 
 
         // -----------------------------------------------------------
-        // 9. REPORT MODAL LOGIC (PURCHASE ONLY)
+        // 9. NEW PART PAYMENT MODAL LOGIC (UPDATED FOR HISTORY)
         // -----------------------------------------------------------
+        window.openAddPaymentModal = (purchaseId) => {
+            const purchase = purchasesData.find(p => p.id === purchaseId);
+            if (!purchase) return;
+
+            window.currentEditingPurchaseId = purchaseId; // Reusing this ID placeholder
+
+            const total = purchase.totalAmount || 0;
+            const paid = purchase.amountPaid || 0;
+            const pendingAmount = total - paid;
+            const today = new Date().toISOString().split('T')[0]; // Default to today
+
+            document.getElementById('add-payment-title').textContent = `Supplier: ${purchase.supplierName} Account`;
+            document.getElementById('add-payment-total').textContent = `₹${total.toLocaleString('en-IN')}`;
+            document.getElementById('add-payment-paid').textContent = `₹${paid.toLocaleString('en-IN')}`;
+            document.getElementById('add-payment-pending').textContent = `₹${pendingAmount.toLocaleString('en-IN')}`;
+            
+            // Set default date for payment
+            document.getElementById('paymentDate').value = today;
+
+            // Hidden fields for calculation
+            document.getElementById('current-paid-for-calc').value = paid;
+            document.getElementById('total-amount-for-calc').value = total;
+            
+            document.getElementById('new-payment-amount').value = ''; // Clear previous input
+
+            document.getElementById('add-payment-modal').classList.remove('hidden');
+        };
+
+        window.closeAddPaymentModal = () => {
+            document.getElementById('add-payment-modal').classList.add('hidden');
+            window.currentEditingPurchaseId = null;
+        };
+
+        window.handleAddPayment = async (event) => {
+            event.preventDefault();
+            if (!window.currentEditingPurchaseId) return;
+
+            const form = event.target;
+            const newPaymentAmount = parseFloat(form.newPaymentAmount.value || 0);
+            const paymentDate = form.paymentDate.value; // Get the payment date
+            
+            const currentPaid = parseFloat(document.getElementById('current-paid-for-calc').value || 0);
+            const totalAmount = parseFloat(document.getElementById('total-amount-for-calc').value || 0);
+
+            let newAmountPaid = currentPaid + newPaymentAmount;
+
+            // Optional: Confirm if payment exceeds the total amount
+            if (newAmountPaid > totalAmount) {
+                if (!confirm(`The payment (₹${newPaymentAmount.toLocaleString('en-IN')}) will result in an overpayment! The new total paid (₹${newAmountPaid.toLocaleString('en-IN')}) exceeds the Total Amount (₹${totalAmount.toLocaleString('en-IN')}). Do you want to proceed?`)) {
+                    return;
+                }
+            }
+
+            // Payment Transaction Object
+            const paymentTransaction = {
+                type: 'payment',
+                date: paymentDate,
+                amount: newPaymentAmount,
+                notes: `Payment recorded on ${paymentDate}. Amount: ₹${newPaymentAmount.toLocaleString('en-IN')}.`,
+                createdAt: new Date().toISOString()
+            };
+
+            const saveBtn = document.getElementById('add-payment-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Recording Payment...';
+
+            try {
+                const purchaseRef = doc(db, PUBLIC_PURCHASES_PATH(appId), window.currentEditingPurchaseId);
+                const currentDocSnapshot = await getDoc(purchaseRef);
+                const currentData = currentDocSnapshot.data();
+
+                const updatedData = {
+                    amountPaid: newAmountPaid, 
+                    history: [...(currentData.history || []), paymentTransaction], // Append new payment transaction
+                    updatedAt: new Date().toISOString()
+                };
+
+                await updateDoc(purchaseRef, updatedData);
+                console.log("Part payment recorded successfully against account:", window.currentEditingPurchaseId);
+                closeAddPaymentModal();
+            } catch (e) {
+                console.error("Error recording payment: ", e);
+                document.getElementById('add-payment-form-error').textContent = `Error recording payment: ${e.message}`;
+                document.getElementById('add-payment-form-error').classList.remove('hidden');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Record Payment';
+            }
+        };
+
+
+        // -----------------------------------------------------------
+        // 10. CANCEL PURCHASE BY SERIAL NUMBER LOGIC
+        // -----------------------------------------------------------
+        window.openCancelBySerialModal = () => {
+            document.getElementById('cancel-by-serial-modal').classList.remove('hidden');
+            document.getElementById('cancel-serial-number').value = '';
+            document.getElementById('cancel-form-error').classList.add('hidden');
+        };
+
+        window.closeCancelBySerialModal = () => {
+            document.getElementById('cancel-by-serial-modal').classList.add('hidden');
+        };
+
+        window.handleCancelBySerial = async (event) => {
+            event.preventDefault();
+            const serialNumber = document.getElementById('cancel-serial-number').value.trim().toUpperCase();
+            const errorDiv = document.getElementById('cancel-form-error');
+            const cancelBtn = document.getElementById('cancel-purchase-btn');
+
+            errorDiv.classList.add('hidden');
+            cancelBtn.disabled = true;
+            cancelBtn.textContent = 'Searching...';
+
+            try {
+                if (!serialNumber) {
+                    throw new Error("Please enter a valid Serial Number.");
+                }
+
+                let purchaseToCancel = null;
+                let accountId = null;
+
+                // 1. Search for the transaction across all accounts
+                for (const account of purchasesData) {
+                    const transaction = account.history?.find(t => t.type === 'purchase' && t.serialNumber === serialNumber);
+                    if (transaction) {
+                        purchaseToCancel = transaction;
+                        accountId = account.id;
+                        break;
+                    }
+                }
+
+                if (!purchaseToCancel) {
+                    throw new Error(`Error: Purchase with Serial Number "${serialNumber}" not found in any account.`);
+                }
+                
+                if (purchaseToCancel.status !== 'active') {
+                    throw new Error(`Error: Purchase ${serialNumber} is already marked as "${purchaseToCancel.status.toUpperCase()}" and cannot be cancelled again.`);
+                }
+                
+                const originalAmount = purchaseToCancel.amount || 0;
+                const originalInitialPaid = purchaseToCancel.initialPaid || 0;
+
+                const confirmMessage = `Confirm cancellation of purchase ${serialNumber}:\nSupplier: ${purchasesData.find(a => a.id === accountId).supplierName}\nAmount: ₹${originalAmount.toLocaleString('en-IN')}\nInitial Paid: ₹${originalInitialPaid.toLocaleString('en-IN')}\n\nThis will reverse the amount from the account balance and record a reversal transaction.`;
+
+                if (!confirm(confirmMessage)) {
+                    cancelBtn.disabled = false;
+                    cancelBtn.textContent = 'Cancel Purchase';
+                    return;
+                }
+
+                // 2. Prepare the update data for Firestore
+                const purchaseRef = doc(db, PUBLIC_PURCHASES_PATH(appId), accountId);
+                const currentDocSnapshot = await getDoc(purchaseRef);
+                const currentData = currentDocSnapshot.data();
+                
+                let history = currentData.history || [];
+                let originalTransactionIndex = history.findIndex(t => t.serialNumber === serialNumber);
+
+                if (originalTransactionIndex === -1) {
+                    throw new Error("Internal Error: Transaction found in local data but not in Firestore history.");
+                }
+
+                // --- 2a. Update the original transaction status to 'cancelled' ---
+                let updatedHistory = [...history];
+                updatedHistory[originalTransactionIndex] = { 
+                    ...updatedHistory[originalTransactionIndex], 
+                    status: 'cancelled',
+                    cancellationDate: new Date().toISOString().split('T')[0]
+                };
+
+                // --- 2b. Create a reversal transaction for the audit trail ---
+                const reversalTransaction = {
+                    type: 'reversal',
+                    date: new Date().toISOString().split('T')[0],
+                    amount: originalAmount, // Store positive amount, handle sign in report
+                    initialPaid: originalInitialPaid, // Store positive amount, handle sign in report
+                    serialNumber: serialNumber, // Link to the original purchase
+                    notes: `Reversal of Purchase ${serialNumber} (Original Amount: ₹${originalAmount.toLocaleString('en-IN')}, Initial Paid: ₹${originalInitialPaid.toLocaleString('en-IN')})`,
+                    createdAt: new Date().toISOString()
+                };
+
+                // --- 2c. Append the reversal transaction to history ---
+                updatedHistory.push(reversalTransaction);
+
+
+                // 3. Calculate new running totals and update Firestore
+                const newTotalAmount = (currentData.totalAmount || 0) - originalAmount;
+                const newAmountPaid = (currentData.amountPaid || 0) - originalInitialPaid;
+
+                const updatedData = {
+                    totalAmount: Math.max(0, newTotalAmount), 
+                    amountPaid: Math.max(0, newAmountPaid),
+                    history: updatedHistory, 
+                    updatedAt: new Date().toISOString()
+                };
+
+                await updateDoc(purchaseRef, updatedData);
+                
+                alert(`Success: Purchase ${serialNumber} has been successfully cancelled and reversed from the account of ${currentData.supplierName}.`);
+                closeCancelBySerialModal();
+
+            } catch (e) {
+                console.error("Error cancelling purchase: ", e);
+                errorDiv.textContent = `Cancellation Failed: ${e.message}`;
+                errorDiv.classList.remove('hidden');
+                errorDiv.classList.add('bg-red-100', 'text-red-700');
+            } finally {
+                cancelBtn.disabled = false;
+                cancelBtn.textContent = 'Cancel Purchase';
+            }
+        };
+
+
+        // -----------------------------------------------------------
+        // 11. DELETE SUPPLIER ACCOUNT LOGIC
+        // -----------------------------------------------------------
+        window.currentDeletingPurchaseId = null;
+
+        window.openDeleteConfirmationModal = (purchaseId) => {
+            const purchase = purchasesData.find(p => p.id === purchaseId);
+            if (!purchase) return;
+
+            window.currentDeletingPurchaseId = purchaseId;
+            document.getElementById('delete-supplier-name').textContent = purchase.supplierName;
+            document.getElementById('delete-total-cost').textContent = (purchase.totalAmount || 0).toLocaleString('en-IN');
+            document.getElementById('delete-total-pending').textContent = ((purchase.totalAmount || 0) - (purchase.amountPaid || 0)).toLocaleString('en-IN');
+
+            document.getElementById('delete-supplier-modal').classList.remove('hidden');
+            document.getElementById('delete-form-error').classList.add('hidden'); // Clear previous errors
+        };
+
+        window.closeDeleteConfirmationModal = () => {
+            document.getElementById('delete-supplier-modal').classList.add('hidden');
+            window.currentDeletingPurchaseId = null;
+        };
+
+        window.handleDeleteSupplierAccount = async () => {
+            if (!window.currentDeletingPurchaseId) return;
+
+            const deleteBtn = document.getElementById('confirm-delete-btn');
+            deleteBtn.disabled = true;
+            deleteBtn.textContent = 'Deleting...';
+            
+            const supplierName = document.getElementById('delete-supplier-name').textContent;
+            const errorDiv = document.getElementById('delete-form-error');
+
+            try {
+                // This permanently deletes the supplier's account document and ALL its financial history.
+                const purchaseRef = doc(db, PUBLIC_PURCHASES_PATH(appId), window.currentDeletingPurchaseId);
+                await deleteDoc(purchaseRef);
+
+                console.log("Supplier account deleted successfully:", window.currentDeletingPurchaseId);
+                alert(`Success: The account and all financial details for supplier "${supplierName}" have been permanently deleted.`);
+
+                closeDeleteConfirmationModal();
+                
+            } catch (e) {
+                console.error("Error deleting supplier account: ", e);
+                errorDiv.textContent = `Error deleting account: ${e.message}`;
+                errorDiv.classList.remove('hidden');
+            } finally {
+                deleteBtn.disabled = false;
+                deleteBtn.textContent = 'Yes, Delete Account Permanently';
+            }
+        };
+
+
+        // -----------------------------------------------------------
+        // 12. REPORT MODAL LOGIC (UPDATED FOR DATE FILTERING)
+        // -----------------------------------------------------------
+        
         window.openReportModal = () => {
             document.getElementById('report-modal').classList.remove('hidden');
-            document.getElementById('report-results').innerHTML = '<p class="text-center text-gray-500">Enter dates and click "Generate Report".</p>';
+            document.getElementById('report-results').innerHTML = '<p class="text-center text-gray-500">Enter filter and click "Generate Report".</p>';
+            document.getElementById('report-supplier-name').value = '';
+
+            // NEW: Set default date range (e.g., beginning of the year to today)
+            const today = new Date().toISOString().split('T')[0];
+            const firstDayOfYear = new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
+            
+            document.getElementById('report-from-date').value = firstDayOfYear;
+            document.getElementById('report-to-date').value = today;
         };
 
         window.closeReportModal = () => {
             document.getElementById('report-modal').classList.add('hidden');
         };
 
+        // Helper function for date comparison (handles start-of-day for 'from' and end-of-day for 'to')
+        const isDateBetween = (dateStr, fromStr, toStr) => {
+            if (!dateStr) return true; 
+
+            // Normalize transaction date to midnight
+            const transactionDate = new Date(dateStr);
+            transactionDate.setHours(0, 0, 0, 0); 
+
+            // Normalize from date to midnight (inclusive)
+            const from = fromStr ? new Date(fromStr) : null;
+            if (from) from.setHours(0, 0, 0, 0);
+
+            // Normalize to date to end of day (inclusive)
+            const to = toStr ? new Date(toStr) : null;
+            if (to) to.setHours(23, 59, 59, 999);
+            
+            const isAfterOrEqualFrom = !from || transactionDate >= from;
+            const isBeforeOrEqualTo = !to || transactionDate <= to;
+
+            return isAfterOrEqualFrom && isBeforeOrEqualTo;
+        };
+
+        /**
+         * FIX APPLIED HERE: The logic now sums transactions within the date range, 
+         * instead of relying on the supplier's running total.
+         */
         window.handleReport = (event) => {
             event.preventDefault();
-            const fromDateStr = document.getElementById('report-from-date').value;
-            const toDateStr = document.getElementById('report-to-date').value;
             const supplierFilter = document.getElementById('report-supplier-name').value.toLowerCase().trim();
-            const resultsDiv = document.getElementById('report-results');
-            
-            // if (!fromDateStr || !toDateStr) {
-            //     resultsDiv.innerHTML = '<div class="p-3 bg-red-100 text-red-700 rounded-lg">Please select both start and end dates.</div>';
-            //     return;
-            // }
+            const fromDateStr = document.getElementById('report-from-date').value; 
+            const toDateStr = document.getElementById('report-to-date').value;     
 
-            // const fromDate = new Date(fromDateStr);
-            // const toDate = new Date(toDateStr);
-            // toDate.setHours(23, 59, 59, 999); 
+            const resultsDiv = document.getElementById('report-results');
             
             resultsDiv.innerHTML = '<div class="text-center text-indigo-500"><i class="fas fa-spinner fa-spin mr-2"></i> Generating Report...</div>';
 
-            // Set null if date string is empty.
-            const fromDate = fromDateStr ? new Date(fromDateStr) : null;
-            let toDate = null;
-            if (toDateStr) {
-                 toDate = new Date(toDateStr);
-                 // Set to end of the day for inclusive filtering
-                 toDate.setHours(23, 59, 59, 999); 
-            }
-
             try {
-                // PURCHASE REPORT LOGIC
-                const filteredPurchases = purchasesData.filter(purchase => {
-                    // const purchaseDate = new Date(purchase.purchaseDate); 
-                    
-                    // // NEW: Logic to check if supplier name matches the filter (or if filter is empty)
-                    // const supplierMatch = !supplierFilter || (purchase.supplierName && purchase.supplierName.toLowerCase().includes(supplierFilter));
-                    
-                    // return purchaseDate >= fromDate && purchaseDate <= toDate && supplierMatch;
-
-                    // 1. Supplier Filter
-                    const supplierMatch = !supplierFilter || (purchase.supplierName && purchase.supplierName.toLowerCase().includes(supplierFilter));
-                    
-                    // 2. Date Filter Logic
-                    const purchaseDate = new Date(purchase.purchaseDate); 
-                    
-                    // If the date is null (not entered), the condition is always true, effectively skipping the filter.
-                    const fromMatch = !fromDate || purchaseDate >= fromDate;
-                    const toMatch = !toDate || purchaseDate <= toDate;
-
-                    return fromMatch && toMatch && supplierMatch;
+                // 1. FILTER ACCOUNTS
+                const filteredAccounts = purchasesData.filter(account => {
+                    const supplierMatch = !supplierFilter || (account.supplierName && account.supplierName.toLowerCase().includes(supplierFilter));
+                    return supplierMatch;
                 });
                 
-                const totalSpent = filteredPurchases.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
-                const totalPaid = filteredPurchases.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
-                const totalPendingPayment = totalSpent - totalPaid;
+                // --- NEW LOGIC: Calculate Grand Totals based on TRANSACTIONS in the Date Range ---
+                let grandTotalCostForRange = 0;
+                let grandTotalPaidForRange = 0;
+                
+                // 3. GENERATE DETAILED SUPPLIER HTML
+                let supplierDetailsHtml = '';
+                const sortedSuppliers = filteredAccounts.sort((a, b) => a.supplierName.localeCompare(b.supplierName));
+
+                const dateRangeDisplay = (fromDateStr || 'All Time') + ' to ' + (toDateStr || 'All Time');
+
+                sortedSuppliers.forEach(account => {
+                    
+                    // --- 3a. Transaction History Processing ---
+                    let accountHistoryForRange = {
+                        totalCost: 0,
+                        totalPaid: 0,
+                        transactions: []
+                    };
+                    
+                    // Sort history by date (and then by creation time for tie-breaks)
+                    let sortedHistory = account.history ? account.history.sort((a, b) => {
+                        if (a.date !== b.date) return new Date(a.date) - new Date(b.date);
+                        return new Date(a.createdAt) - new Date(b.createdAt);
+                    }) : [];
+
+                    // Filter and Tally Transactions for the Report
+                    sortedHistory.forEach(transaction => {
+                        if (isDateBetween(transaction.date, fromDateStr, toDateStr)) {
+                            
+                            // Tallying the cost and paid effect of the transaction
+                            let costEffect = 0;
+                            let paidEffect = 0;
+                            
+                            if (transaction.type === 'purchase') {
+                                // Only count active purchases towards cost
+                                if (transaction.status !== 'cancelled') {
+                                    costEffect = transaction.amount || 0;
+                                }
+                                paidEffect = transaction.initialPaid || 0;
+                                
+                            } else if (transaction.type === 'reversal') {
+                                // Reversals subtract cost/initial paid
+                                costEffect = -(transaction.amount || 0);
+                                paidEffect = -(transaction.initialPaid || 0);
+                                
+                            } else if (transaction.type === 'payment') {
+                                // Payments only affect amount paid
+                                paidEffect = transaction.amount || 0;
+                            }
+                            
+                            // Only include transactions that have a financial effect
+                            if (costEffect !== 0 || paidEffect !== 0 || transaction.type !== 'reversal') {
+                                accountHistoryForRange.totalCost += costEffect;
+                                accountHistoryForRange.totalPaid += paidEffect;
+                                
+                                // Add transaction details needed for rendering
+                                accountHistoryForRange.transactions.push({
+                                    ...transaction,
+                                    costEffect: costEffect,
+                                    paidEffect: paidEffect
+                                });
+                            }
+                        }
+                    });
+                    
+                    // Add to Grand Totals (Only for the activity within the range)
+                    grandTotalCostForRange += accountHistoryForRange.totalCost;
+                    grandTotalPaidForRange += accountHistoryForRange.totalPaid;
+                    
+                    // --- TRANSACTION HISTORY TABLE GENERATION ---
+                    let historyHtml = '<div class="mt-4 border-t pt-3"><h5 class="text-md font-semibold text-gray-700 mb-2">Activity Details (Filtered: <span class="text-sm font-normal text-indigo-500">' + dateRangeDisplay + '</span>):</h5>';
+                    
+                    if (accountHistoryForRange.transactions.length === 0) {
+                        historyHtml += '<p class="text-sm text-gray-500">No transactions found in the selected date range for this supplier.</p>';
+                    } else {
+                        // 3c. RENDER FILTERED TABLE
+                        historyHtml += `
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type / Status</th>
+                                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Serial No.</th>
+                                        <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Cost Change (₹)</th>
+                                        <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Paid Change (₹)</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200 text-sm">
+                        `;
+                        
+                        accountHistoryForRange.transactions.forEach(transaction => {
+                            let typeColor, typeLabel, serial;
+                            serial = transaction.serialNumber || 'N/A';
+                            
+                            if (transaction.type === 'purchase') {
+                                typeColor = transaction.status === 'cancelled' ? 'text-gray-700 bg-gray-100' : 'text-red-700 bg-red-100';
+                                typeLabel = transaction.status === 'cancelled' ? `Purchase (Cancelled)` : 'Purchase (Active)';
+                            } else if (transaction.type === 'reversal') {
+                                typeColor = 'text-orange-700 bg-orange-100 font-bold'; 
+                                typeLabel = 'Purchase Reversal';
+                            } else {
+                                typeColor = 'text-green-700 bg-green-100';
+                                typeLabel = 'Payment';
+                            }
+                            
+                            // Format cost and paid effect (show sign for negative/reversals)
+                            const costDisplay = transaction.costEffect.toLocaleString('en-IN', {signDisplay: transaction.costEffect < 0 ? 'exceptZero' : 'auto'});
+                            const paidDisplay = transaction.paidEffect.toLocaleString('en-IN', {signDisplay: transaction.paidEffect < 0 ? 'exceptZero' : 'auto'});
+                            
+                            historyHtml += `
+                                <tr>
+                                    <td class="px-3 py-2 whitespace-nowrap">${transaction.date}</td>
+                                    <td class="px-3 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeColor}">${typeLabel}</span></td>
+                                    <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500">${serial}</td>
+                                    <td class="px-3 py-2 whitespace-nowrap text-right font-semibold">${costDisplay}</td>
+                                    <td class="px-3 py-2 whitespace-nowrap text-right font-semibold">${paidDisplay}</td>
+                                </tr>
+                            `;
+                        });
+
+                        historyHtml += '</tbody></table>';
+                    }
+                    historyHtml += '</div>';
+                    // --- END TRANSACTION HISTORY TABLE GENERATION ---
+
+
+                    // 3d. Supplier Card shows Current Running Balance AND Activity for the period
+                    const pendingAmount = (account.totalAmount || 0) - (account.amountPaid || 0);
+                    const pendingColor = pendingAmount > 0 ? 'text-red-600' : 'text-green-600';
+                    const pendingText = pendingAmount > 0 ? 'Pending' : 'Paid Off';
+                    
+                    const activityPending = accountHistoryForRange.totalCost - accountHistoryForRange.totalPaid;
+                    const activityPendingColor = activityPending > 0 ? 'text-red-600' : activityPending < 0 ? 'text-green-600' : 'text-gray-600';
+
+                    supplierDetailsHtml += `
+                        <div class="bg-white p-4 rounded-xl border border-gray-200 shadow-sm mb-6">
+                            <h4 class="text-xl font-bold text-indigo-700 mb-2">${account.supplierName}</h4>
+                            
+                            <div class="border-b pb-3 mb-3">
+                                <h5 class="text-sm font-semibold text-gray-700 mb-1">Current Running Account Balance (All Time):</h5>
+                                <div class="grid grid-cols-3 gap-2 text-sm">
+                                    <div><span class="font-semibold text-gray-600">Total Cost:</span> <span class="text-red-600 font-bold">₹${(account.totalAmount || 0).toLocaleString('en-IN')}</span></div>
+                                    <div><span class="font-semibold text-gray-600">Total Paid:</span> <span class="text-blue-600 font-bold">₹${(account.amountPaid || 0).toLocaleString('en-IN')}</span></div>
+                                    <div><span class="font-semibold text-gray-600">Net Pending:</span> <span class="${pendingColor} font-bold">₹${pendingAmount.toLocaleString('en-IN')} (${pendingText})</span></div>
+                                </div>
+                            </div>
+
+                            <div class="border-b pb-3 mb-3">
+                                <h5 class="text-sm font-semibold text-gray-700 mb-1">Financial Activity in Report Period (${dateRangeDisplay}):</h5>
+                                <div class="grid grid-cols-3 gap-2 text-sm">
+                                    <div><span class="font-semibold text-gray-600">Total Cost Added:</span> <span class="text-red-600 font-bold">₹${accountHistoryForRange.totalCost.toLocaleString('en-IN')}</span></div>
+                                    <div><span class="font-semibold text-gray-600">Total Paid:</span> <span class="text-blue-600 font-bold">₹${accountHistoryForRange.totalPaid.toLocaleString('en-IN')}</span></div>
+                                    <div><span class="font-semibold text-gray-600">Net Effect:</span> <span class="${activityPendingColor} font-bold">₹${activityPending.toLocaleString('en-IN')}</span></div>
+                                </div>
+                            </div>
+
+                            ${historyHtml}
+                        </div>
+                    `;
+                });
+
+
+                // 4. RENDER FINAL REPORT
+                const grandTotalPendingForRange = grandTotalCostForRange - grandTotalPaidForRange;
 
                 resultsDiv.innerHTML = `
-                    <div class="p-4 bg-white rounded-xl border border-indigo-300 card-shadow">
-                        <h3 class="text-xl font-bold text-indigo-700 mb-4 border-b pb-2">Parts Purchase Summary</h3>
+                    <div class="p-4 bg-white rounded-xl border border-indigo-300 card-shadow mb-6">
+                        <h3 class="text-xl font-bold text-indigo-700 mb-4 border-b pb-2">Overall Financial Activity Summary (${dateRangeDisplay})</h3>
                         
-                        <div class="mb-3">
-                            <p class="text-sm font-medium text-gray-600">Period:</p>
-                            <p class="text-lg font-semibold">${fromDateStr} to ${toDateStr}</p>
-                        </div>
-
                         <div class="flex flex-col md:flex-row gap-4">
                             <div class="flex-1 p-3 bg-red-50 border-l-4 border-red-500 rounded-lg">
-                                <p class="text-sm font-medium text-red-700">Total Purchase Cost</p>
-                                <p class="text-2xl font-extrabold text-red-600 mt-1">₹${totalSpent.toLocaleString('en-IN')}</p>
+                                <p class="text-sm font-medium text-red-700">Total Purchase Cost Added</p>
+                                <p class="text-2xl font-extrabold text-red-600 mt-1">₹${grandTotalCostForRange.toLocaleString('en-IN')}</p>
+                            </div>
+                            <div class="flex-1 p-3 bg-green-50 border-l-4 border-green-500 rounded-lg">
+                                <p class="text-sm font-medium text-green-700">Total Payments Recorded</p>
+                                <p class="text-2xl font-extrabold text-green-600 mt-1">₹${grandTotalPaidForRange.toLocaleString('en-IN')}</p>
                             </div>
                             <div class="flex-1 p-3 bg-yellow-50 border-l-4 border-yellow-500 rounded-lg">
-                                <p class="text-sm font-medium text-yellow-700">Total Pending Payment</p>
-                                <p class="text-2xl font-extrabold text-yellow-600 mt-1">₹${totalPendingPayment.toLocaleString('en-IN')}</p>
+                                <p class="text-sm font-medium text-yellow-700">Net Cost Effect</p>
+                                <p class="text-2xl font-extrabold text-yellow-600 mt-1">₹${grandTotalPendingForRange.toLocaleString('en-IN')}</p>
                             </div>
                         </div>
 
-                        <p class="mt-4 text-xs text-gray-500">Report generated from ${filteredPurchases.length} purchases in this period.</p>
+                        <p class="mt-4 text-xs text-gray-500">Summary generated from ${filteredAccounts.length} vendor account(s).</p>
                     </div>
+                    
+                    <h3 class="text-xl font-bold text-indigo-700 mb-4 border-b pb-2">Account Details by Vendor</h3>
+                    
+                    ${filteredAccounts.length === 0 ? '<p class="text-center text-gray-500">No accounts match the selected criteria.</p>' : supplierDetailsHtml}
                 `;
 
             } catch (e) {
@@ -413,8 +929,9 @@
                 <form id="new-purchase-form" onsubmit="handleSubmitPurchase(event)">
                     
                     <div class="mb-4">
-                        <label for="supplierName" class="block text-sm font-medium text-gray-700">Supplier/Vendor Name</label>
+                        <label for="supplierName" class="block text-sm font-medium text-gray-700">Supplier/Vendor Account Name</label>
                         <input type="text" id="supplierName" name="supplierName" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
+                        <p class="text-xs text-indigo-500 mt-1 font-semibold">Note: New purchases for an existing name will be *added* to that vendor's running account balance. A unique **Serial Number** will be assigned.</p>
                     </div>
                     
                     <div class="mb-4">
@@ -424,17 +941,17 @@
                     
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                         <div>
-                            <label for="totalAmount" class="block text-sm font-medium text-gray-700">Total Amount (₹)</label>
+                            <label for="totalAmount" class="block text-sm font-medium text-gray-700">Current Purchase Total Amount (₹)</label>
                             <input type="number" id="totalAmount" name="totalAmount" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                         <div>
-                            <label for="amountPaid" class="block text-sm font-medium text-gray-700">Amount Paid (₹)</label>
+                            <label for="amountPaid" class="block text-sm font-medium text-gray-700">Current Purchase Initial Paid (₹)</label>
                             <input type="number" id="amountPaid" name="amountPaid" value="0" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                     </div>
 
                     <div class="mb-6">
-                        <label for="purchaseNotes" class="block text-sm font-medium text-gray-700">Notes (Optional)</label>
+                        <label for="purchaseNotes" class="block text-sm font-medium text-gray-700">Notes (Saved in Transaction History)</label>
                         <textarea id="purchaseNotes" name="purchaseNotes" rows="3" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500"></textarea>
                     </div>
 
@@ -446,14 +963,19 @@
 
             <div class="lg:col-span-2">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-bold text-indigo-700">Recent Parts Purchases</h2>
-                    <button onclick="openReportModal()" class="py-2 px-4 bg-green-500 text-white font-semibold rounded-xl hover:bg-green-600 transition duration-150 text-sm">
-                        <i class="fas fa-file-invoice-dollar mr-1"></i> Report
-                    </button>
+                    <h2 class="text-2xl font-bold text-indigo-700">Supplier Account Balances</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="openCancelBySerialModal()" class="py-2 px-4 bg-red-500 text-white font-semibold rounded-xl hover:bg-red-600 transition duration-150 text-sm">
+                            <i class="fas fa-undo-alt mr-1"></i> Cancel Purchase by Serial
+                        </button>
+                        <button onclick="openReportModal()" class="py-2 px-4 bg-green-500 text-white font-semibold rounded-xl hover:bg-green-600 transition duration-150 text-sm">
+                            <i class="fas fa-file-invoice-dollar mr-1"></i> Report
+                        </button>
+                    </div>
                 </div>
                 
                 <div class="mb-6">
-                    <input type="text" id="purchase-search" placeholder="Search purchases by Supplier Name..." oninput="filterAndRenderPurchases()" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 border focus:border-indigo-500 focus:ring-indigo-500">
+                    <input type="text" id="purchase-search" placeholder="Search supplier accounts by Name..." oninput="filterAndRenderPurchases()" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 border focus:border-indigo-500 focus:ring-indigo-500">
                 </div>
                 
                 <div id="purchase-list" class="space-y-4">
@@ -466,25 +988,26 @@
         <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
             <div class="p-6">
                 <div class="flex justify-between items-center mb-4 border-b pb-3">
-                    <h3 class="text-2xl font-bold text-indigo-700">Edit Purchase Payment Status</h3>
+                    <h3 class="text-2xl font-bold text-indigo-700">Edit Account Totals (Correction)</h3>
                     <button onclick="closeEditPurchaseModal()" class="text-gray-400 hover:text-gray-600">
                         <i class="fas fa-times text-xl"></i>
                     </button>
                 </div>
                 
-                <h4 id="edit-purchase-title" class="text-lg font-semibold mb-4 text-gray-800">Purchase Title Placeholder</h4>
+                <h4 id="edit-purchase-title" class="text-lg font-semibold mb-4 text-gray-800">Account Title Placeholder</h4>
+                <p class="text-sm text-red-500 mb-4">Warning: Manually editing these values will affect the entire running balance for this supplier.</p>
 
                 <div id="edit-purchase-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
 
                 <form onsubmit="handleEditPurchase(event)">
                     
                     <div class="mb-4">
-                        <label for="edit-totalAmount" class="block text-sm font-medium text-gray-700">Total Purchase Amount (₹)</label>
+                        <label for="edit-totalAmount" class="block text-sm font-medium text-gray-700">Total Purchase Amount (Running Balance ₹)</label>
                         <input type="number" id="edit-totalAmount" name="edit_totalAmount" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
                     </div>
 
                     <div class="mb-6">
-                        <label for="edit-amountPaid" class="block text-sm font-medium text-gray-700">Amount Paid (₹)</label>
+                        <label for="edit-amountPaid" class="block text-sm font-medium text-gray-700">Total Amount Paid to Date (Running Balance ₹)</label>
                         <input type="number" id="edit-amountPaid" name="edit_amountPaid" min="0" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-indigo-500 focus:ring-indigo-500">
                     </div>
 
@@ -496,39 +1019,185 @@
         </div>
     </div>
 
+    <div id="add-payment-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-4 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-green-700">Record New Payment</h3>
+                    <button onclick="closeAddPaymentModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <h4 id="add-payment-title" class="text-lg font-semibold mb-4 text-gray-800">Purchase Title Placeholder</h4>
+
+                <div class="grid grid-cols-3 gap-3 text-center mb-5">
+                    <div class="bg-red-50 p-3 rounded-lg">
+                        <p class="text-xs text-red-700 font-medium">Total Cost</p>
+                        <p id="add-payment-total" class="text-xl font-bold text-red-600"></p>
+                    </div>
+                    <div class="bg-blue-50 p-3 rounded-lg">
+                        <p class="text-xs text-blue-700 font-medium">Currently Paid</p>
+                        <p id="add-payment-paid" class="text-xl font-bold text-blue-600"></p>
+                    </div>
+                    <div class="bg-yellow-50 p-3 rounded-lg">
+                        <p class="text-xs text-yellow-700 font-medium">Pending</p>
+                        <p id="add-payment-pending" class="text-xl font-bold text-yellow-600"></p>
+                    </div>
+                </div>
+
+
+                <div id="add-payment-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form onsubmit="handleAddPayment(event)">
+                    
+                    <div class="mb-4">
+                        <label for="paymentDate" class="block text-sm font-medium text-gray-700">Date of Payment</label>
+                        <input type="date" id="paymentDate" name="paymentDate" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="new-payment-amount" class="block text-lg font-bold text-gray-700">New Payment Amount (₹)</label>
+                        <input type="number" id="new-payment-amount" name="newPaymentAmount" min="0.01" step="any" required class="mt-1 block w-full rounded-md border-green-500 shadow-sm p-3 border-2 text-2xl text-green-700 focus:ring-green-500">
+                        <p class="text-xs text-gray-500 mt-1">Enter the exact amount received now.</p>
+                    </div>
+
+                    <input type="hidden" id="current-paid-for-calc" name="currentPaidAmount" value="0">
+                    <input type="hidden" id="total-amount-for-calc" name="totalAmountValue" value="0">
+
+                    <div class="flex space-x-3">
+                        <button type="button" onclick="closeAddPaymentModal()" class="flex-1 py-3 px-4 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            <i class="fas fa-times-circle mr-2"></i> Cancel
+                        </button>
+                        <button type="submit" id="add-payment-btn" class="flex-1 py-3 px-4 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition duration-150 shadow-md">
+                            <i class="fas fa-plus-circle mr-2"></i> Record Payment
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div id="cancel-by-serial-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-4 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-red-700">Cancel Purchase by Serial Number</h3>
+                    <button onclick="closeCancelBySerialModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <p class="text-sm text-red-500 mb-4">Enter the unique serial number of the purchase you wish to cancel.</p>
+
+                <div id="cancel-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <form onsubmit="handleCancelBySerial(event)">
+                    
+                    <div class="mb-6">
+                        <label for="cancel-serial-number" class="block text-lg font-bold text-gray-700">Purchase Serial Number (e.g., PUR-123456)</label>
+                        <input type="text" id="cancel-serial-number" name="cancelSerialNumber" required class="mt-1 block w-full rounded-md border-red-500 shadow-sm p-3 border-2 text-2xl text-red-700 uppercase focus:ring-red-500">
+                    </div>
+
+                    <div class="flex space-x-3">
+                        <button type="button" onclick="closeCancelBySerialModal()" class="flex-1 py-3 px-4 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            <i class="fas fa-times-circle mr-2"></i> Close
+                        </button>
+                        <button type="submit" id="cancel-purchase-btn" class="flex-1 py-3 px-4 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 transition duration-150 shadow-md">
+                            <i class="fas fa-undo-alt mr-2"></i> Cancel Purchase
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="delete-supplier-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl w-full max-w-lg card-shadow">
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-4 border-b pb-3">
+                    <h3 class="text-2xl font-bold text-red-700">Permanent Account Deletion</h3>
+                    <button onclick="closeDeleteConfirmationModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <p class="text-lg font-semibold mb-4 text-gray-800">
+                    Are you sure you want to permanently delete the financial account for supplier: 
+                    <span id="delete-supplier-name" class="text-red-600 font-bold"></span>?
+                </p>
+
+                <div class="p-4 bg-red-50 border-l-4 border-red-500 text-red-700 mb-4 rounded-md">
+                    <p class="font-bold mb-1">WARNING: This action is irreversible!</p>
+                    <p class="text-sm">Deleting the supplier account **also deletes all associated financial details**, including the running totals and transaction history.</p>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 text-center mb-5 text-sm">
+                    <div class="bg-red-50 p-3 rounded-lg">
+                        <p class="text-xs text-red-700 font-medium">Total Cost</p>
+                        <p id="delete-total-cost" class="text-xl font-bold text-red-600"></p>
+                    </div>
+                    <div class="bg-yellow-50 p-3 rounded-lg">
+                        <p class="text-xs text-yellow-700 font-medium">Total Pending</p>
+                        <p id="delete-total-pending" class="text-xl font-bold text-yellow-600"></p>
+                    </div>
+                </div>
+
+                <div id="delete-form-error" class="p-3 bg-red-100 text-red-700 rounded-lg mb-4 hidden"></div>
+
+                <div class="flex space-x-3">
+                    <button type="button" onclick="closeDeleteConfirmationModal()" class="flex-1 py-3 px-4 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                        <i class="fas fa-times-circle mr-2"></i> No, Keep Account
+                    </button>
+                    <button type="button" onclick="handleDeleteSupplierAccount()" id="confirm-delete-btn" class="flex-1 py-3 px-4 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 transition duration-150 shadow-md">
+                        <i class="fas fa-trash-alt mr-2"></i> Yes, Delete Account Permanently
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 
     <div id="report-modal" class="hidden fixed inset-0 z-50 overflow-y-auto modal-overlay flex items-center justify-center p-4">
-        <div class="bg-white rounded-xl w-full max-w-xl card-shadow">
+        <div class="bg-white rounded-xl w-full max-w-3xl card-shadow">
             <div class="p-6">
                 <div class="flex justify-between items-center mb-6 border-b pb-3">
                     <h3 class="text-2xl font-bold text-green-700">Purchase Expense Report Generator</h3>
-                    <button onclick="closeReportModal()" class="text-gray-400 hover:text-gray-600">
-                        X
-                    </button>
-                </div>
+                    </div>
                 
                 <form onsubmit="handleReport(event)" class="mb-6 p-4 border border-gray-200 rounded-xl bg-gray-50">
                     <div class="mb-4"> 
                         <label for="report-supplier-name" class="block text-sm font-medium text-gray-700">Filter by Supplier Name (Optional)</label>
                         <input type="text" id="report-supplier-name" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500" placeholder="e.g., Apple Parts Inc.">
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+
+                    <div class="grid grid-cols-2 gap-4 mb-4">
                         <div>
-                            <label for="report-from-date" class="block text-sm font-medium text-gray-700">From Date</label>
+                            <label for="report-from-date" class="block text-sm font-medium text-gray-700">From Date (Transaction Filter)</label>
                             <input type="date" id="report-from-date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
                         </div>
                         <div>
-                            <label for="report-to-date" class="block text-sm font-medium text-gray-700">To Date</label>
+                            <label for="report-to-date" class="block text-sm font-medium text-gray-700">To Date (Transaction Filter)</label>
                             <input type="date" id="report-to-date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-green-500 focus:ring-green-500">
                         </div>
                     </div>
+                    
                     <button type="submit" class="w-full py-3 px-4 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition duration-150 shadow-md">
                         <i class="fas fa-chart-line mr-2"></i> Generate Report
                     </button>
                 </form>
 
-                <div id="report-results" class="space-y-3">
+                <div class="max-h-[60vh] overflow-y-auto pr-3">
+                    <div id="report-results" class="space-y-3">
                     </div>
+                </div>
+                
+                <div class="border-t pt-4 mt-6">
+                    <button onclick="closeReportModal()" class="w-full py-3 px-4 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                        <i class="fas fa-times-circle mr-2"></i> Close Report
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -551,5 +1220,4 @@
         document.getElementById('app-content').classList.add('hidden');
     </script>
 </body>
-
 </html>
